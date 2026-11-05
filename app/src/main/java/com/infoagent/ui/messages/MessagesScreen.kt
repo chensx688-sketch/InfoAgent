@@ -82,6 +82,12 @@ fun MessagesScreen(vm: MessagesViewModel = viewModel()) {
     androidx.compose.runtime.LaunchedEffect(Unit) {
         vm.refreshCaptureState()
         vm.refreshBriefPoints()
+        vm.ensureCaptureBound()
+        // 页面可见时每 5 秒刷新一次真实绑定状态与今日入库数
+        while (true) {
+            kotlinx.coroutines.delay(5_000)
+            vm.refreshCaptureState()
+        }
     }
 
     var granted by remember { mutableStateOf(vm.permissionGranted()) }
@@ -120,7 +126,8 @@ fun MessagesScreen(vm: MessagesViewModel = viewModel()) {
 
         CaptureStatusCard(
             permission = capture.permission,
-            connected = capture.connectedAt > 0L,
+            connected = capture.serviceBound,
+            rebinding = capture.rebinding,
             todayCount = capture.todayCount,
             lastIngestAt = capture.lastIngestAt,
             lastOutcome = capture.lastOutcome,
@@ -235,6 +242,7 @@ fun MessagesScreen(vm: MessagesViewModel = viewModel()) {
 private fun CaptureStatusCard(
     permission: Boolean,
     connected: Boolean,
+    rebinding: Boolean,
     todayCount: Long,
     lastIngestAt: Long,
     lastOutcome: String,
@@ -288,8 +296,17 @@ private fun CaptureStatusCard(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Row {
-                TextButton(onClick = onRebind) { Text("立即重连") }
+                TextButton(onClick = onRebind, enabled = !rebinding) {
+                    Text(if (rebinding) "重连中…" else "立即重连")
+                }
                 TextButton(onClick = onOpenSettings) { Text("通知使用权设置") }
+            }
+            if (permission && !connected && !rebinding) {
+                Text(
+                    "若点「立即重连」仍无效：到「通知使用权设置」里把本应用关掉再打开即可恢复。",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
             }
         }
     }

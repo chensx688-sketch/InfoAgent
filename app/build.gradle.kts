@@ -35,8 +35,8 @@ android {
         applicationId = "com.infoagent"
         minSdk = 26
         targetSdk = 35
-        versionCode = 18
-        versionName = "1.0.0"
+        versionCode = 20
+        versionName = "1.0.2"
         vectorDrawables { useSupportLibrary = true }
     }
 

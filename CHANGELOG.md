@@ -1,5 +1,17 @@
 # 变更记录（契约/提示任何变更必须先升版本并同步 docs/PLAN-v6.1.md）
 
+## 1.0.2 (2026-11-05) — 采集恢复完全在 App 内完成
+- 状态卡改为显示**真实绑定状态**（`NotifyCaptureService.isConnected`），不再拿历史 `connected_at` 冒充"在线"；断开时显示"监听已断开"并给出提示。
+- 打开消息页时若发现未绑定：自动 `requestRebind`（400ms 后一次 + 1.5s 后复核），用户无需任何操作。
+- 「立即重连」改为两次 `requestRebind`（间隔 1.2s/1.5s）并刷新真实状态，按钮显示"重连中…"；仍失败时提示去「通知使用权设置」关开一次。
+- 覆盖安装/开机广播继续自动重绑；**不再需要 adb 或电脑**。
+- 消息页可见时每 5 秒刷新一次状态与今日入库数，连上后状态会自己变绿。
+
+## 1.0.1 (2026-11-05) — 修复覆盖安装后采集不到消息
+- 根因：重装/覆盖安装后系统仍保留「通知使用权」授权，但**没有重新绑定** `NotifyCaptureService`，`dumpsys activity services` 里没有该服务，所有通知回调都不会发生（界面却显示"监听在线"，因为读的是历史 connected_at）。
+- 修复：服务增加 `isConnected` 状态；`InfoAgentApp` 启动时、`BootReceiver` 收到 `MY_PACKAGE_REPLACED` 时，若未连接则 `requestRebind()` 自愈。
+- 手动兜底：消息页「立即重连」仍可用；真机验证用 `adb shell cmd notification disallow_listener/allow_listener` 可强制重绑。
+
 ## 1.0.0 (2026-11-05) — 简报改版：一天一条时间轴 + 增量片段
 - **数据模型 v3**：新增 `brief_slice`（biz_date/seq/trigger/from_ts/to_ts/payload_json/new_count/tokens/state/read_at）；`MIGRATION_2_3` 建表并回填 `agent_run` 历史（seq 按天编号，历史一律已读）；`agent_run` 保留只读暂不删。
 - **生成逻辑**：新增 `BriefingPipeline.generateSlice(trigger)`——区间 =「上一条 OK 的 to_ts → now」，当天首条从 00:00 起；间隔 <5 分钟直接落 `SKIPPED(too_soon)` 不调模型；prompt 增加「上一条简报摘要」与 `continued` 指令；片段无论 OK/FAILED/SKIPPED 都落库。

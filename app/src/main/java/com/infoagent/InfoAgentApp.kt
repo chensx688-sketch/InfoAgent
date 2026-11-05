@@ -15,5 +15,11 @@ class InfoAgentApp : Application() {
         runCatching { BriefingScheduler.catchUp(this) }       // P1-3：补跑错过的时段
         runCatching { com.infoagent.remind.CaptureWatchdogWorker.schedulePeriodic(this) } // 监听自愈
         runCatching { com.infoagent.agent.MemoryWorker.schedule(this) } // 每晚 23:30 记忆提炼
+        // 覆盖安装/强制停止后，系统可能保留授权但不重新绑定监听服务 → 启动时自愈一次
+        runCatching {
+            if (!com.infoagent.capture.NotifyCaptureService.isConnected) {
+                com.infoagent.capture.NotifyCaptureService.requestRebind(this)
+            }
+        }
     }
 }

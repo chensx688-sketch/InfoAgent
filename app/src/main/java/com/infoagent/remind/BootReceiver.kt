@@ -22,6 +22,7 @@ class BootReceiver : BroadcastReceiver() {
                 ReminderScheduler.rescheduleAll(app)
                 CaptureWatchdogWorker.schedulePeriodic(app)
                 com.infoagent.agent.MemoryWorker.schedule(app)
+                com.infoagent.capture.NotifyCaptureService.requestRebind(app)
             } catch (e: Exception) {
                 android.util.Log.w("InfoAgentBoot", "reschedule failed", e)
             } finally {

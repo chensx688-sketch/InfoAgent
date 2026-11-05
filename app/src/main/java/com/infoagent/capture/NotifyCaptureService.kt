@@ -30,6 +30,11 @@ class NotifyCaptureService : NotificationListenerService() {
         const val KEY_LAST_INGEST_AT = "last_ingest_at"
         const val KEY_LAST_OUTCOME = "last_outcome"
 
+        /** 当前进程里服务是否真的被系统绑上（重装/冻结后可能只是"授权还在"但没绑定） */
+        @Volatile
+        var isConnected: Boolean = false
+            private set
+
         fun state(context: Context) = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
         /** 请求系统重新绑定（Android 8.1+）；失败返回 false */
@@ -52,12 +57,14 @@ class NotifyCaptureService : NotificationListenerService() {
     override fun onListenerConnected() {
         super.onListenerConnected()
         Log.i(TAG, "listener connected")
+        isConnected = true
         state(this).edit().putLong(KEY_CONNECTED_AT, System.currentTimeMillis()).apply()
     }
 
     override fun onListenerDisconnected() {
         super.onListenerDisconnected()
         Log.w(TAG, "listener disconnected → schedule rebind")
+        isConnected = false
         state(this).edit().putLong(KEY_CONNECTED_AT, 0L).apply()
         runCatching { CaptureWatchdogWorker.scheduleNow(applicationContext) }
     }

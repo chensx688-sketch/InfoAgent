@@ -29,10 +29,13 @@ data class ConversationUi(
 
 data class CaptureUiState(
     val permission: Boolean = false,
+    /** 真实绑定状态（不是历史 connected_at） */
+    val serviceBound: Boolean = false,
     val connectedAt: Long = 0L,
     val lastIngestAt: Long = 0L,
     val lastOutcome: String = "",
     val todayCount: Long = 0L,
+    val rebinding: Boolean = false,
 )
 
 class MessagesViewModel(app: Application) : AndroidViewModel(app) {
@@ -51,6 +54,7 @@ class MessagesViewModel(app: Application) : AndroidViewModel(app) {
         )[0]
         _capture.value = CaptureUiState(
             permission = NotificationAccess.isGranted(ctx),
+            serviceBound = com.infoagent.capture.NotifyCaptureService.isConnected,
             connectedAt = prefs.getLong(com.infoagent.capture.NotifyCaptureService.KEY_CONNECTED_AT, 0L),
             lastIngestAt = prefs.getLong(com.infoagent.capture.NotifyCaptureService.KEY_LAST_INGEST_AT, 0L),
             lastOutcome = prefs.getString(com.infoagent.capture.NotifyCaptureService.KEY_LAST_OUTCOME, "").orEmpty(),
@@ -58,9 +62,36 @@ class MessagesViewModel(app: Application) : AndroidViewModel(app) {
         )
     }
 
-    fun rebindCapture() {
-        com.infoagent.capture.NotifyCaptureService.requestRebind(getApplication())
+    /**
+     * 只靠 App 自己恢复：先 requestRebind，等 1.2s；还没连上再请求一次；最后刷新真实状态。
+     * 不需要 adb，也不需要用户去系统设置里来回切（设置页只是兜底）。
+     */
+    fun rebindCapture() = viewModelScope.launch {
+        val ctx = getApplication<Application>()
+        if (!NotificationAccess.isGranted(ctx)) {
+            refreshCaptureState()
+            return@launch
+        }
+        _capture.update { it.copy(rebinding = true) }
+        com.infoagent.capture.NotifyCaptureService.requestRebind(ctx)
+        kotlinx.coroutines.delay(1_200)
+        if (!com.infoagent.capture.NotifyCaptureService.isConnected) {
+            com.infoagent.capture.NotifyCaptureService.requestRebind(ctx)
+            kotlinx.coroutines.delay(1_500)
+        }
         refreshCaptureState()
+        _capture.update { it.copy(rebinding = false) }
+    }
+
+    /** 进消息页时若发现没绑上，自动尝试一次（用户什么都不用点） */
+    fun ensureCaptureBound() = viewModelScope.launch {
+        val ctx = getApplication<Application>()
+        if (NotificationAccess.isGranted(ctx) && !com.infoagent.capture.NotifyCaptureService.isConnected) {
+            kotlinx.coroutines.delay(400)
+            com.infoagent.capture.NotifyCaptureService.requestRebind(ctx)
+            kotlinx.coroutines.delay(1_500)
+            refreshCaptureState()
+        }
     }
 
     private val _convPoints = kotlinx.coroutines.flow.MutableStateFlow<Map<String, String>>(emptyMap())
