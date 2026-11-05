@@ -10,15 +10,30 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
-      - uses: android-actions/setup-android@v3
+
+      - name: Prepare Android SDK
+        run: |
+          SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
+          echo "sdk.dir=$SDK_ROOT" > local.properties
+          echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
+          SDKM=$(ls -d "$SDK_ROOT"/cmdline-tools/*/bin/sdkmanager 2>/dev/null | head -1)
+          if [ -n "$SDKM" ]; then
+            yes | "$SDKM" --licenses > /dev/null 2>&1 || true
+            "$SDKM" "platforms;android-35" "build-tools;35.0.0" > /dev/null 2>&1 || true
+          fi
+          chmod +x gradlew
+
       - name: Unit tests
         run: ./gradlew testDebugUnitTest --no-daemon
+
       - name: Assemble debug
         run: ./gradlew assembleDebug --no-daemon
+
       - name: Upload test report
         if: always()
         uses: actions/upload-artifact@v4
