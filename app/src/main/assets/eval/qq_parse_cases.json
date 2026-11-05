@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "description": "P2-19：QQ 通知解析 20 条样例（阶段 14 验收种子）。raw_title/raw_text 为通知原文，expect 为期望解析结果。",
+  "cases": [
+    {"name": "qq_single_friend_text", "raw_title": "张三", "raw_text": "张三: 明天下午三点开会别忘了", "expect": {"peer": "张三", "sender": "张三", "content": "明天下午三点开会别忘了", "group": false, "msg_type": "text"}},
+    {"name": "qq_single_friend_reply", "raw_title": "张三", "raw_text": "张三: [回复] 好的收到", "expect": {"peer": "张三", "sender": "张三", "content": "[回复] 好的收到", "group": false, "msg_type": "text"}},
+    {"name": "qq_group_mention_all", "raw_title": "产品交流群", "raw_text": "李四: @全体成员 周五下班前交周报", "expect": {"peer": "产品交流群", "sender": "李四", "content": "@全体成员 周五下班前交周报", "group": true, "msg_type": "text", "mention": "@全体成员"}},
+    {"name": "qq_group_mention_me", "raw_title": "产品交流群", "raw_text": "王五: @我 看一下这个需求", "expect": {"peer": "产品交流群", "sender": "王五", "content": "@我 看一下这个需求", "group": true, "msg_type": "text", "mention": "@我"}},
+    {"name": "qq_group_reply_prefix", "raw_title": "产品交流群", "raw_text": "赵六: [回复李四] 我觉得可以", "expect": {"peer": "产品交流群", "sender": "赵六", "content": "[回复李四] 我觉得可以", "group": true, "msg_type": "text"}},
+    {"name": "qq_image_placeholder", "raw_title": "张三", "raw_text": "张三: [图片]", "expect": {"peer": "张三", "sender": "张三", "content": "[图片]", "group": false, "msg_type": "image"}},
+    {"name": "qq_emoji_text_mixed", "raw_title": "张三", "raw_text": "张三: 哈哈[表情]好的", "expect": {"peer": "张三", "sender": "张三", "content": "哈哈[表情]好的", "group": false, "msg_type": "text"}},
+    {"name": "qq_voice_placeholder", "raw_title": "张三", "raw_text": "张三: [语音]", "expect": {"peer": "张三", "sender": "张三", "content": "[语音]", "group": false, "msg_type": "voice"}},
+    {"name": "qq_file_placeholder", "raw_title": "文档分享群", "raw_text": "钱七: [文件] 项目计划书.docx", "expect": {"peer": "文档分享群", "sender": "钱七", "content": "[文件] 项目计划书.docx", "group": true, "msg_type": "file"}},
+    {"name": "qq_group_without_prefix", "raw_title": "产品交流群", "raw_text": "周八: 国庆调休通知见公告", "expect": {"peer": "产品交流群", "sender": "周八", "content": "国庆调休通知见公告", "group": true, "msg_type": "text"}},
+    {"name": "qq_merged_two_messages", "raw_title": "张三", "raw_text": "张三: 在吗\n张三: 有点事找你", "expect": [{"peer": "张三", "sender": "张三", "content": "在吗", "msg_type": "text"}, {"peer": "张三", "sender": "张三", "content": "有点事找你", "msg_type": "text"}]},
+    {"name": "qq_merged_group_two_senders", "raw_title": "产品交流群", "raw_text": "李四: 文档我放群文件了\n王五: 收到，辛苦了", "expect": [{"peer": "产品交流群", "sender": "李四", "content": "文档我放群文件了", "group": true, "msg_type": "text"}, {"peer": "产品交流群", "sender": "王五", "content": "收到，辛苦了", "group": true, "msg_type": "text"}]},
+    {"name": "qq_withdraw_notice", "raw_title": "产品交流群", "raw_text": "李四撤回了一条消息", "expect": {"withdraw": true, "peer": "产品交流群", "sender": "李四", "group": true}},
+    {"name": "qq_n_messages_folded", "raw_title": "闲聊吹水群", "raw_text": "[10条新消息]", "expect": {"folded": true, "peer": "闲聊吹水群", "count": 10}},
+    {"name": "qq_empty_text", "raw_title": "张三", "raw_text": "", "expect": {"empty": true, "peer": "张三"}},
+    {"name": "qq_url_content", "raw_title": "张三", "raw_text": "张三: 看这个 https://example.com/a?b=1", "expect": {"peer": "张三", "sender": "张三", "content": "看这个 https://example.com/a?b=1", "group": false, "msg_type": "text", "urls": ["https://example.com/a?b=1"]}},
+    {"name": "qq_long_text_truncated", "raw_title": "张三", "raw_text": "张三: " + "好".repeat(90), "expect": {"peer": "张三", "sender": "张三", "content_len_le": 91, "truncated_ok": true}},
+    {"name": "qq_special_chars", "raw_title": "张三", "raw_text": "张三: 价格 ￥199.9（含税）\n第二行", "expect": {"peer": "张三", "sender": "张三", "content": "价格 ￥199.9（含税）\n第二行", "group": false, "msg_type": "text"}},
+    {"name": "qq_system_notice_group", "raw_title": "产品交流群", "raw_text": "你已成为新管理员", "expect": {"system": true, "peer": "产品交流群"}},
+    {"name": "qq_video_call_missed", "raw_title": "张三", "raw_text": "张三: [视频通话]", "expect": {"peer": "张三", "sender": "张三", "content": "[视频通话]", "group": false, "msg_type": "call"}}
+  ]
+}

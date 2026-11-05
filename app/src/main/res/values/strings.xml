@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">信息小agent</string>
+    <string name="nav_messages">消息</string>
+    <string name="nav_memos">备忘</string>
+    <string name="nav_agent">Agent</string>
+    <string name="nav_settings">设置</string>
+    <string name="nav_privacy">隐私</string>
+    <string name="menu">菜单</string>
+</resources>

@@ -1,0 +1,32 @@
+# 构建产物
+*.iml
+.gradle/
+.kotlin/
+/build
+/app/build
+/captures
+.externalNativeBuild
+.cxx
+
+# 本机配置与签名（绝不入库）
+/local.properties
+*.jks
+*.keystore
+/keystore.properties
+/key.properties
+
+# IDE
+.idea/
+.DS_Store
+.vscode/
+
+# 日志与临时文件
+*.log
+hs_err_pid*.log
+replay_pid*.log
+*.hprof
+.probe.txt
+mcp.json
+# 本机环境修补脚本与备份
+/gradle/wrapper/*.bak
+/fix-gpu-tdr.cmd

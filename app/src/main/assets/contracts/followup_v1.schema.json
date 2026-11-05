@@ -1,0 +1,12 @@
+{
+  "$id": "followup_v1",
+  "$comment": "追问契约（§8.4）：多轮对话落 followup_chat；截断=最近4轮+该段简报全文+当日摘要。",
+  "type": "object",
+  "required": ["role", "content"],
+  "properties": {
+    "role": {"type": "string", "enum": ["user", "assistant"]},
+    "content": {"type": "string", "maxLength": 2000},
+    "ts": {"type": "integer"},
+    "refs": {"type": "array", "maxItems": 10, "items": {"type": "integer"}}
+  }
+}

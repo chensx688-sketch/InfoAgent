@@ -1,0 +1,21 @@
+{
+  "$id": "auto_memo_v1",
+  "$comment": "自动整理输出契约（§8.2）。消息内容作为不可信数据传入；只接受枚举与受限字段。",
+  "type": "object",
+  "required": ["items"],
+  "properties": {
+    "items": {
+      "type": "array", "maxItems": 10, "required": true,
+      "items": {
+        "type": "object", "required": ["title"],
+        "properties": {
+          "title": {"type": "string", "maxLength": 120},
+          "due": {"type": ["string", "null"], "maxLength": 40, "format": "iso8601"},
+          "urgency": {"type": "string", "enum": ["normal", "urgent"]},
+          "source_msg_ids": {"type": "array", "maxItems": 5, "items": {"type": "integer"}}
+        }
+      }
+    },
+    "skip": {"type": "boolean"}
+  }
+}

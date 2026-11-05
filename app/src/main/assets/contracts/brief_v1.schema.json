@@ -1,0 +1,61 @@
+{
+  "$id": "brief_v1",
+  "$comment": "三段简报输出契约（§8.3）。字段：类型/枚举/可空/最大长度/必填。",
+  "type": "object",
+  "required": ["window", "generated_at", "wechat_points", "memo_status", "plan"],
+  "properties": {
+    "window": {"type": "string", "enum": ["MORNING", "AFTERNOON", "EVENING", "MANUAL"], "required": true},
+    "generated_at": {"type": "string", "maxLength": 40, "required": true},
+    "wechat_points": {
+      "type": "array", "maxItems": 20, "required": true,
+      "items": {
+        "type": "object", "required": ["conv", "point"],
+        "properties": {
+          "conv": {"type": "string", "maxLength": 60},
+          "point": {"type": "string", "maxLength": 300},
+          "key_time": {"type": ["string", "null"], "maxLength": 40}
+        }
+      }
+    },
+    "memo_status": {
+      "type": "object", "required": ["done", "pending_daily", "pending_temp"],
+      "properties": {
+        "done": {"type": "integer", "minimum": 0},
+        "pending_daily": {"type": "array", "maxItems": 30, "items": {"type": "object", "properties": {"text": {"type": "string", "maxLength": 200}, "time": {"type": ["string", "null"], "maxLength": 40}}}},
+        "pending_temp": {"type": "array", "maxItems": 30, "items": {"type": "object", "properties": {"text": {"type": "string", "maxLength": 200}, "time": {"type": ["string", "null"], "maxLength": 40}}}}
+      }
+    },
+    "plan": {
+      "type": "object", "required": ["timeline"],
+      "properties": {
+        "timeline": {
+          "type": "array", "maxItems": 20, "required": true,
+          "items": {
+            "type": "object", "required": ["time", "title"],
+            "properties": {
+              "time": {"type": "string", "maxLength": 40},
+              "title": {"type": "string", "maxLength": 120},
+              "source": {"type": "string", "enum": ["memo", "chat", "memory", "other"]},
+              "detail": {"type": "string", "maxLength": 300},
+              "kind": {"type": "string", "enum": ["must", "maybe"]},
+              "date": {"type": ["string", "null"], "maxLength": 20}
+            }
+          }
+        },
+        "note": {"type": "string", "maxLength": 500}
+      }
+    },
+    "recommendations": {
+      "type": "array", "maxItems": 10,
+      "items": {"type": "object", "required": ["text"], "properties": {
+        "text": {"type": "string", "maxLength": 200},
+        "reason": {"type": "string", "maxLength": 200},
+        "memory_refs": {"type": "array", "maxItems": 5, "items": {"type": "integer"}}
+      }}
+    },
+    "tomorrow": {"type": ["object", "null"], "properties": {
+      "todos": {"type": "array", "maxItems": 20, "items": {"type": "object", "properties": {"title": {"type": "string", "maxLength": 120}, "time": {"type": ["string", "null"], "maxLength": 40}}}}
+    }},
+    "risks": {"type": "array", "maxItems": 10, "items": {"type": "string", "maxLength": 200}}
+  }
+}

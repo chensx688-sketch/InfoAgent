@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- D13：云备份与 D2D 换机全量排除（本应用纯本地，不参与系统备份/迁移） -->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="sharedpref" path="." />
+        <exclude domain="database" path="." />
+        <exclude domain="file" path="." />
+        <exclude domain="external" path="." />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="sharedpref" path="." />
+        <exclude domain="database" path="." />
+        <exclude domain="file" path="." />
+        <exclude domain="external" path="." />
+    </device-transfer>
+</data-extraction-rules>
