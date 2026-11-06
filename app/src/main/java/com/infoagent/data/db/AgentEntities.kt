@@ -71,6 +71,16 @@ data class BriefSliceEntity(
     @ColumnInfo(name = "error") val error: String? = null,
     @ColumnInfo(name = "created_at") val createdAt: Long,
     @ColumnInfo(name = "read_at") val readAt: Long? = null,
+    /**
+     * v4：本条片段覆盖到的最大消息 id。
+     *
+     * 增量从「上一条 OK 的 to_ts」改成「上一条的 covered_max_id」，因为通知里的 postTime 不可靠
+     * （部分 ROM 更新通知时沿用首次投递时间、迟到投递、跨时区），按时间戳切窗会把真正的新消息
+     * 永久挡在水位线之外——现象就是「再生成还是之前那几句，最新数据永远进不来」。
+     */
+    @ColumnInfo(name = "covered_max_id") val coveredMaxId: Long = 0,
+    /** v5：本次生成参考到的外部事实（天气/搜索），换行分隔；空串=没用外部接口 */
+    @ColumnInfo(name = "context_json") val contextJson: String = "",
 )
 
 @Entity(tableName = "followup_chat")

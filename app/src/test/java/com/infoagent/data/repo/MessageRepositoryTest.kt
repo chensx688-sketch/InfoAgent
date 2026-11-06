@@ -81,4 +81,50 @@ class MessageRepositoryTest {
         assertEquals(0L, db.messageDao().countAll())
         assertEquals(0L, db.ftsStore.count())
     }
+
+    @Test
+    fun `关闭采集的会话直接丢弃不入库`() = runBlocking {
+        db = InfoAgentDatabase.build(context, "repo-muted.db")
+        val repo = MessageRepository(db)
+        repo.ingest(msg(content = "先建立会话"))
+        db.messageDao().setConversationMuted(msg().peerId, 1L)
+        val before = db.messageDao().countAll()
+
+        val r = repo.ingest(msg(content = "这条不该进来").copy(ts = msg().ts + 60_000L))
+        assertTrue(r is IngestResult.Muted)
+        assertEquals("不采集的会话不能占库", before, db.messageDao().countAll())
+
+        // 打开后立即恢复采集
+        db.messageDao().setConversationMuted(msg().peerId, 0L)
+        val again = repo.ingest(msg(content = "恢复了").copy(ts = msg().ts + 120_000L))
+        assertTrue(again is IngestResult.Created)
+    }
+
+    @Test
+    fun `按消息 id 取回原文并能拿到同会话上下文`() = runBlocking {
+        db = InfoAgentDatabase.build(context, "ref-focus-test.db")
+        val repo = MessageRepository(db)
+        val t0 = 1_762_400_000_000L
+        repo.ingest(msg(ts = t0, content = "预算 8 万能不能做"))
+        repo.ingest(msg(ts = t0 + 60_000, content = "报价单已发你"))
+        repo.ingest(msg(ts = t0 + 120_000, content = "收到，我看下"))
+        repo.ingest(msg(ts = t0 + 7 * 3_600_000L, content = "明天再说")) // 窗口外
+
+        val focused = db.messageDao().byIds(
+            listOfNotNull(db.messageDao().findByDedupKey("")?.id).ifEmpty {
+                // 用内容定位目标消息（去重键由 repo 生成，这里按内容查）
+                db.messageDao().searchLike("报价单", 5).map { it.id }
+            },
+        )
+        assertEquals(1, focused.size)
+
+        val w = RefFocusBuilder.window(focused)
+        val context = db.messageDao().aroundPeer("peer-1", w.first, w.last)
+        val focus = RefFocusBuilder.build(focused, context)
+
+        assertEquals(3, focus.rows.size)
+        assertEquals(1, focus.focusedCount)
+        assertEquals("报价单已发你", focus.rows.first { it.focused }.msg.content)
+        assertTrue("窗口外的消息不该混进来", focus.rows.none { it.msg.content == "明天再说" })
+    }
 }

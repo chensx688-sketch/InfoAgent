@@ -110,8 +110,7 @@ class MainActivity : ComponentActivity() {
                         deepLink = com.infoagent.island.IslandIntents.openApp(applicationContext, "agent"),
                     ),
                 )
-                androidx.core.app.NotificationManagerCompat.from(applicationContext)
-                    .notify(id, builder.build())
+                com.infoagent.island.NotificationPoster.notify(applicationContext, id, builder)
             }
         }
         setContent {

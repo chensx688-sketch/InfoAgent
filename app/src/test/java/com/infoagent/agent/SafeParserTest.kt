@@ -66,13 +66,44 @@ class SafeParserTest {
         assertTrue(r is SafeParser.Result.Failed)
     }
 
+    /**
+     * v1.4.3 改的：window / generated_at 由客户端注入，模型不必回显。
+     * 原来看模型回显再校验，等于把「模型不知道时间」的锅算到解析头上，纯属自找失败。
+     */
     @Test
-    fun `缺少任何必填块即失败`() {
-        val noMemo = validBrief.replace(Regex("\"memo_status\"[\\s\\S]*?\\},\\s*\"plan\""), "\"plan\"")
-        assertTrue(SafeParser.parseBrief(noMemo) is SafeParser.Result.Failed)
+    fun `模型不回 window 和 generated_at 也能解析，取值以请求为准`() {
+        val noWindow = validBrief.replace("\"window\": \"MORNING\",", "")
+        val r1 = SafeParser.parseBrief(noWindow, expectedWindow = "MANUAL")
+        assertTrue("应当照样可用：" + r1, r1 is SafeParser.Result.Ok)
+        assertEquals("MANUAL", (r1 as SafeParser.Result.Ok).value.window)
 
         val noGenerated = validBrief.replace(Regex("\"generated_at\": \"[^\"]+\","), "")
-        assertTrue(SafeParser.parseBrief(noGenerated) is SafeParser.Result.Failed)
+        val r2 = SafeParser.parseBrief(noGenerated, expectedWindow = "MORNING")
+        assertTrue(r2 is SafeParser.Result.Ok)
+        assertTrue("要补一个真实时间戳", (r2 as SafeParser.Result.Ok).value.generatedAt.isNotBlank())
+    }
+
+    @Test
+    fun `模型回的 window 与请求不符时以请求为准`() {
+        val r = SafeParser.parseBrief(validBrief, expectedWindow = "EVENING")
+        assertTrue(r is SafeParser.Result.Ok)
+        val brief = (r as SafeParser.Result.Ok).value
+        assertEquals("EVENING", brief.window)
+        assertTrue("要留痕说明模型写错了", brief.warnings.any { it.contains("window") })
+    }
+
+    /**
+     * 这条规则是 1.4.2 改的：memo_status / plan 在 JSON 里排在后面，被 max_tokens 截断时最先丢，
+     * 但它们只是「已有备忘快照」和「时间线」——为了它们丢掉已经算好的怎么办/要点是不划算的。
+     */
+    @Test
+    fun `缺备忘快照和时间线时降级为空而不是整份丢弃`() {
+        val noMemo = validBrief.replace(Regex("\"memo_status\"[\\s\\S]*?\\},\\s*\"plan\""), "\"plan\"")
+        val r = SafeParser.parseBrief(noMemo)
+        assertTrue("应当仍然可用：" + r, r is SafeParser.Result.Ok)
+        r as SafeParser.Result.Ok
+        assertEquals(0, r.value.memoStatus.done)
+        assertTrue("要留痕告诉用户缺了什么", r.warnings.any { it.contains("备忘快照") })
     }
 
     @Test
@@ -123,5 +154,95 @@ class SafeParserTest {
         assertEquals(3, facts.first().period?.weekday)
         assertEquals(null, facts[1].period) // 非法 freq 忽略 period，但事实保留
         assertEquals(1.0, facts[1].confidence, 0.0001) // 置信度夹紧
+    }
+
+    @Test
+    fun `brief_v2 解析怎么办与消息编号`() {
+        val raw = """
+        {"window":"MANUAL","generated_at":"2026-11-06T12:00:00+08:00",
+         "advice":[
+           {"who":"陈英钿","ask":"要不要从西湖带东西","say":"不用带啦，我这边都有。你路上注意安全，到了发个定位。",
+            "why":"她只是顺口问一句，不必让她绕路","watch":["11 月西湖边风大湿冷，提醒她带外套","问清下午几点出发，别让她赶返程高峰"],
+            "kind":"reply","due":"今天中午前","basis":"常识","refs":[11,12]},
+           {"who":"财务","ask":"合同要今天盖章","kind":"prepare","basis":"原文"},
+           {"who":"","kind":"reply"}
+         ],
+         "wechat_points":[{"conv":"陈英钿","point":"明天去西湖，问要不要带东西","key_time":"09:20","refs":[11]}],
+         "memo_status":{"done":0,"pending_daily":[],"pending_temp":[]},
+         "plan":{"timeline":[]},"recommendations":[],"risks":[]}
+        """.trimIndent()
+        val r = SafeParser.parseBrief(raw, "MANUAL")
+        assertTrue(r is SafeParser.Result.Ok)
+        val brief = (r as SafeParser.Result.Ok).value
+
+        // 缺 ask 的那条被丢弃，剩下 2 条
+        assertEquals(2, brief.advice.size)
+        val first = brief.advice[0]
+        assertEquals("陈英钿", first.who)
+        assertEquals("reply", first.kind)
+        assertEquals("今天中午前", first.due)
+        assertEquals("常识", first.basis)
+        assertEquals(2, first.watch.size)
+        assertEquals(listOf(11L, 12L), first.refs)
+        assertTrue("回复草稿要能直接发", first.say!!.startsWith("不用带"))
+        // 老字段不受影响
+        assertEquals(listOf(11L), brief.wechatPoints.first().refs)
+    }
+
+    @Test
+    fun `没有 advice 字段的旧简报仍能解析`() {
+        val raw = """
+        {"window":"MORNING","generated_at":"2026-11-06T10:00:00+08:00",
+         "wechat_points":[{"conv":"王总","point":"三点开会"}],
+         "memo_status":{"done":0,"pending_daily":[],"pending_temp":[]},
+         "plan":{"timeline":[]},"recommendations":[],"risks":[]}
+        """.trimIndent()
+        val r = SafeParser.parseBrief(raw, "MORNING")
+        assertTrue(r is SafeParser.Result.Ok)
+        assertTrue((r as SafeParser.Result.Ok).value.advice.isEmpty())
+    }
+
+    // ---------- 截断自愈（1.4.2）：模型把最后一句写到一半就没了 ----------
+
+    /** 真实截断形态：字符串中途断掉，后面的括号全没有 */
+    private val truncated = """
+        {"window":"MANUAL","generated_at":"2026-11-04T10:00:00+08:00",
+         "headline":"今天要回王总的报价确认",
+         "wechat_points":[{"conv":"王总","point":"报价单已发，等确认折扣","key_time":"15:00","refs":[1]}],
+         "advice":[{"who":"王总","ask":"确认折扣并回签","say":"折扣按 92 折走，我下午回签",
+                    "why":"合同周五前要归档","basis":"原文","watch":["周五前扫描件要一起给
+    """.trimIndent()
+
+    @Test
+    fun `被截断的简报能补全并给出提醒`() {
+        // 严格解析确实失败（这才是用户看到的「JSON 解析失败」）
+        assertTrue(SafeParser.parseBrief(truncated, "MANUAL") is SafeParser.Result.Failed)
+
+        val r = SafeParser.parseBriefLenient(truncated, "MANUAL")
+        assertTrue("补全后应当能解析", r is SafeParser.Result.Ok)
+        r as SafeParser.Result.Ok
+        assertEquals(1, r.value.wechatPoints.size)
+        assertEquals("确认折扣并回签", r.value.advice.single().ask)
+        assertTrue("要告诉用户这是补出来的", r.warnings.any { it.contains("截断") })
+    }
+
+    @Test
+    fun `本来合法的 JSON 不走补全`() {
+        assertTrue(SafeParser.repairTruncated(validBrief) == null)
+    }
+
+    @Test
+    fun `完全不是 JSON 时补全也无能为力`() {
+        assertTrue(SafeParser.repairTruncated("模型今天不想干活，直接说人话了") == null)
+        assertTrue(
+            SafeParser.parseBriefLenient("模型今天不想干活", "MANUAL") is SafeParser.Result.Failed,
+        )
+    }
+
+    @Test
+    fun `空内容给的是「空内容」而不是 JSON 错误`() {
+        val r = SafeParser.parseBriefLenient("   ", "MANUAL")
+        assertTrue(r is SafeParser.Result.Failed)
+        assertTrue((r as SafeParser.Result.Failed).reason.contains("空内容"))
     }
 }

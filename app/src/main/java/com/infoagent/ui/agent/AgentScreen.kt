@@ -96,12 +96,19 @@ fun AgentScreen(
     val memoryMessage by vm.memoryMessage.collectAsState()
 
     var tab by rememberSaveable { mutableIntStateOf(0) }
+    val refFocus by vm.refFocus.collectAsState()
     val tabRequest by AgentTabs.request.collectAsState()
     androidx.compose.runtime.LaunchedEffect(tabRequest) {
         tabRequest?.let {
             tab = it
             AgentTabs.request.value = null
         }
+    }
+
+    // 要点 → 原话：整页接管，返回即回简报（不弹窗，避免打断阅读）
+    refFocus?.let { focus ->
+        RefFocusScreen(focus = focus, onClose = vm::closeRefs)
+        return
     }
 
     Column(Modifier.fillMaxSize()) {
@@ -111,7 +118,11 @@ fun AgentScreen(
             }
         }
         when (tab) {
-            0 -> TimelineTab(vm = vm, initialSliceId = AgentDeepLink.consume())
+            0 -> TimelineTab(
+                vm = vm,
+                initialSliceId = AgentDeepLink.consume(),
+                onOpenRefs = vm::openRefs,
+            )
             1 -> MemoryTab(
                 facts = facts,
                 message = memoryMessage,
@@ -386,6 +397,9 @@ private fun SettingsTab(
         }
 
         Spacer(Modifier.height(20.dp))
+        EnrichSettingsSection(context)
+
+        Spacer(Modifier.height(20.dp))
         Text("权限状态", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
         val granted = remember { com.infoagent.capture.NotificationAccess.isGranted(context) }
         Row(Modifier.padding(top = 6.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -399,6 +413,9 @@ private fun SettingsTab(
                 TextButton(onClick = { com.infoagent.capture.NotificationAccess.openSettings(context) }) { Text("去开启") }
             }
         }
+        Spacer(Modifier.height(16.dp))
+        CaptureScopeSection(context = context)
+
         Spacer(Modifier.height(16.dp))
         Text("系统岛提示", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
         Text(
@@ -425,8 +442,7 @@ private fun SettingsTab(
                             deepLink = com.infoagent.island.IslandIntents.openApp(context, "agent"),
                         ),
                     )
-                    androidx.core.app.NotificationManagerCompat.from(context.applicationContext)
-                        .notify(id, builder.build())
+                    com.infoagent.island.NotificationPoster.notify(context.applicationContext, id, builder)
                 }
             }) { Text("测试系统岛") }
         }
@@ -655,5 +671,209 @@ private fun SettingsTab(
             )
         }
         Spacer(Modifier.height(24.dp))
+    }
+}
+
+/**
+ * 采集范围：逐会话开关（写 conversation.muted）。
+ *
+ * 为什么要这个：现在通知是实时收的，但并不是每个群都值得进简报——
+ * 小区群、家长群、广告群一天几百条，会把真正重要的事淹掉。
+ * 关掉之后 NotificationListenerService 直接丢弃该会话的通知（不入库、不进 prompt、不花钱）。
+ */
+@Composable
+private fun CaptureScopeSection(context: android.content.Context) {
+    val db = remember { com.infoagent.data.db.InfoAgentDatabase.get(context.applicationContext) }
+    val conversations by db.messageDao().observeConversations()
+        .collectAsState(initial = emptyList())
+    var expanded by remember { mutableStateOf(false) }
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
+    val active = conversations.filter { it.muted != 1L }
+    val mutedCount = conversations.size - active.size
+
+    Text("采集范围", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+    Text(
+        "实时采集现在开着。关掉某个群/个人，它的通知就不会再进简报（已存的历史保留）。" +
+            "已选 ${active.size} 个" + if (mutedCount > 0) "，关闭 $mutedCount 个" else "",
+        style = MaterialTheme.typography.labelSmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+    if (conversations.isEmpty()) {
+        Text(
+            "还没有会话记录，等收到通知后再来设置。",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(top = 4.dp),
+        )
+        return
+    }
+    TextButton(onClick = { expanded = !expanded }, modifier = Modifier.padding(top = 2.dp)) {
+        Text(if (expanded) "收起列表" else "选择要采集的群聊 / 个人（${conversations.size}）")
+    }
+    if (!expanded) return
+
+    conversations.take(60).forEach { conv ->
+        val on = conv.muted != 1L
+        Row(
+            Modifier.fillMaxWidth().padding(vertical = 2.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text(
+                    conv.name.ifBlank { conv.peerId },
+                    style = MaterialTheme.typography.bodySmall,
+                    maxLines = 1,
+                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                )
+                Text(
+                    (if (conv.isGroup == 1L) "群聊" else "个人"),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            androidx.compose.material3.Switch(
+                checked = on,
+                onCheckedChange = { checked ->
+                    scope.launch {
+                        db.messageDao().setConversationMuted(conv.peerId, if (checked) 0L else 1L)
+                    }
+                },
+            )
+        }
+    }
+    if (conversations.size > 60) {
+        Text(
+            "只列出最近 60 个会话（按最近消息时间），其余的默认采集。",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+/**
+ * 外部信息：用户自己的天气 / 搜索 key。
+ *
+ * 为什么值得多填两个 key：模型不联网，靠常识写「11 月西湖风大」对你没用；
+ * 有了这一层，简报才能写「明天杭州 12~19℃、有阵雨，带伞」这种真能用的判断。
+ * key 存在本机 Keystore 加密区，只在本机生成简报时调用，不经过任何第三方服务器。
+ */
+@Composable
+private fun EnrichSettingsSection(context: android.content.Context) {
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
+    val settings = remember { com.infoagent.enrich.EnrichSettings(context.applicationContext) }
+    var enabled by remember { mutableStateOf(false) }
+    var loaded by remember { mutableStateOf(false) }
+    var weatherKey by remember { mutableStateOf("") }
+    var weatherHost by remember { mutableStateOf("devapi.qweather.com") }
+    var searchKey by remember { mutableStateOf("") }
+    var searchEndpoint by remember { mutableStateOf("https://api.tavily.com/search") }
+    var homeCity by remember { mutableStateOf("") }
+    var hint by remember { mutableStateOf<String?>(null) }
+
+    androidx.compose.runtime.LaunchedEffect(Unit) {
+        if (!loaded) {
+            val cfg = settings.load()
+            enabled = settings.enabled()
+            weatherHost = cfg.weatherHost
+            searchEndpoint = cfg.searchEndpoint
+            homeCity = cfg.homeCity
+            weatherKey = if (cfg.weatherKey.isBlank()) "" else "已保存"
+            searchKey = if (cfg.searchKey.isBlank()) "" else "已保存"
+            loaded = true
+        }
+    }
+
+    Text("外部信息（让建议落地）", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+    Text(
+        "填了之后，生成简报前会按你消息里提到的地点/日期去查天气与必要的事实，" +
+            "回复建议里就能出现「明天杭州 12~19℃、有阵雨」这种具体判断。key 存本机加密区，不导出。",
+        style = MaterialTheme.typography.labelSmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(top = 2.dp),
+    )
+    Row(Modifier.padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+        androidx.compose.material3.Switch(checked = enabled, onCheckedChange = {
+            enabled = it
+            scope.launch {
+                settings.setEnabled(it)
+                hint = if (it) "已开启：下次生成简报时会先查证" else "已关闭：简报只用消息与常识"
+            }
+        })
+        Spacer(Modifier.width(8.dp))
+        Text(if (enabled) "已开启" else "未开启", style = MaterialTheme.typography.bodySmall)
+    }
+
+    OutlinedTextField(
+        value = homeCity,
+        onValueChange = { homeCity = it },
+        label = { Text("常住城市（消息没提城市时兜底查它的天气）") },
+        placeholder = { Text("杭州") },
+        singleLine = true,
+        modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+    )
+    OutlinedTextField(
+        value = weatherKey,
+        onValueChange = { weatherKey = it },
+        label = { Text("和风天气 Key") },
+        placeholder = { Text("和风天气控制台 → Key 管理") },
+        singleLine = true,
+        visualTransformation = PasswordVisualTransformation(),
+        modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+    )
+    OutlinedTextField(
+        value = weatherHost,
+        onValueChange = { weatherHost = it },
+        label = { Text("天气 API Host") },
+        placeholder = { Text("devapi.qweather.com 或 xxxx.re.qweatherapi.com") },
+        singleLine = true,
+        modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+    )
+    OutlinedTextField(
+        value = searchKey,
+        onValueChange = { searchKey = it },
+        label = { Text("搜索服务 Key（可选，用于查限行/营业时间/机构背景）") },
+        singleLine = true,
+        visualTransformation = PasswordVisualTransformation(),
+        modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+    )
+    OutlinedTextField(
+        value = searchEndpoint,
+        onValueChange = { searchEndpoint = it },
+        label = { Text("搜索接口地址") },
+        singleLine = true,
+        modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+    )
+    Row(Modifier.padding(top = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+        Button(onClick = {
+            scope.launch {
+                val wKey = weatherKey.takeIf { it != "已保存" }
+                val sKey = searchKey.takeIf { it != "已保存" }
+                settings.save(wKey, weatherHost, sKey, searchEndpoint, homeCity)
+                settings.setEnabled(enabled)
+                val cfg = settings.load()
+                weatherKey = if (cfg.weatherKey.isBlank()) "" else "已保存"
+                searchKey = if (cfg.searchKey.isBlank()) "" else "已保存"
+                hint = when {
+                    !cfg.anyEnabled -> "已保存，但还没有可用的 key"
+                    cfg.weatherEnabled && cfg.searchEnabled -> "已保存：天气 + 搜索都可用"
+                    cfg.weatherEnabled -> "已保存：只有天气可用"
+                    else -> "已保存：只有搜索可用"
+                }
+            }
+        }) { Text("保存外部接口") }
+        Spacer(Modifier.width(10.dp))
+        Text(
+            if (enabled) "开启时会消耗你自己的接口额度" else "关闭状态不产生任何外部请求",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+    hint?.let {
+        Text(
+            it,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.padding(top = 6.dp),
+        )
     }
 }

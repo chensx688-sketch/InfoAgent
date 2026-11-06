@@ -56,14 +56,31 @@ import com.infoagent.data.db.BriefSliceEntity
  * 默认只展开最近一条；点行切换；滚到可见即标记已读。
  */
 @Composable
-fun TimelineTab(vm: AgentViewModel, initialSliceId: Long? = null) {
+fun TimelineTab(
+    vm: AgentViewModel,
+    initialSliceId: Long? = null,
+    onOpenRefs: ((List<Long>) -> Unit)? = null,
+) {
     val date by vm.selectedDate.collectAsState()
     val slices by vm.slices.collectAsState()
     val generating by vm.generating.collectAsState()
     val error by vm.sliceError.collectAsState()
     val usage by vm.usage.collectAsState()
+    val metrics by vm.metrics.collectAsState()
+    val freshness by vm.freshness.collectAsState()
+    val context = androidx.compose.ui.platform.LocalContext.current
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
+    // 「现在」指示线的位置；进页面时取一次即可，切片刷新时会重组成新值
+    val nowMinutes = remember(slices) {
+        java.time.LocalTime.now().let { it.hour * 60 + it.minute }
+    }
+
+    // 切日期时重新取该日的真实统计（小时曲线/会话热度/完成率）
+    LaunchedEffect(date) {
+        vm.loadMetrics(date)
+        vm.loadFreshness()
+    }
 
     var expandedId by remember { mutableStateOf<Long?>(null) }
     // 默认展开最近一条 OK（或最新一条）
@@ -107,6 +124,15 @@ fun TimelineTab(vm: AgentViewModel, initialSliceId: Long? = null) {
             }
         }
 
+        // 数据新鲜度：简报「没跟上最新消息」时，先让用户知道卡在哪一环
+        freshness?.let { f ->
+            FreshnessStrip(
+                freshness = f,
+                onGrant = { com.infoagent.capture.NotificationAccess.openSettings(context) },
+                onReconnect = { com.infoagent.capture.NotifyCaptureService.requestRebind(context) },
+            )
+        }
+
         if (slices.isEmpty() && !generating) {
             EmptyDay(
                 isToday = date == com.infoagent.data.util.DayBoundary.today(),
@@ -124,11 +150,15 @@ fun TimelineTab(vm: AgentViewModel, initialSliceId: Long? = null) {
                         slice = slice,
                         expanded = expandedId == slice.id,
                         brief = if (expandedId == slice.id) vm.briefOf(slice) else null,
+                        metrics = metrics,
+                        nowMinutes = nowMinutes,
+                        onVote = { index, refs, up -> vm.voteRecommendation(index, refs, up) },
                         onToggle = {
                             expandedId = if (expandedId == slice.id) null else slice.id
                             if (expandedId == slice.id) vm.markRead(slice.id)
                         },
                         onRetry = { vm.retrySlice(slice.id) },
+                        onOpenRefs = onOpenRefs,
                     )
                 }
                 if (generating) {
@@ -242,8 +272,12 @@ private fun SliceCard(
     slice: BriefSliceEntity,
     expanded: Boolean,
     brief: Brief?,
+    metrics: com.infoagent.data.repo.DayMetrics?,
+    nowMinutes: Int?,
+    onVote: (Int, List<Long>, Boolean) -> Unit,
     onToggle: () -> Unit,
     onRetry: () -> Unit,
+    onOpenRefs: ((List<Long>) -> Unit)? = null,
 ) {
     val failed = slice.state == "FAILED"
     val skipped = slice.state == "SKIPPED"
@@ -313,7 +347,14 @@ private fun SliceCard(
             }
             if (expanded && brief != null) {
                 Spacer(Modifier.height(8.dp))
-                SliceBrief(brief)
+                // 新版可视化：树状图（谁在说）→ 时间带（什么时候）→ 曲线图（节奏）→ 行动
+                BriefRichView(
+                    brief = brief,
+                    metrics = metrics,
+                    nowMinutes = nowMinutes,
+                    onVote = onVote,
+                    onOpenRefs = onOpenRefs,
+                )
             }
             if (expanded && ok && brief == null) {
                 Text(
@@ -327,62 +368,11 @@ private fun SliceCard(
     }
 }
 
-@Composable
-private fun SliceBrief(brief: Brief) {
-    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        Row(horizontalArrangement = Arrangement.spacedBy(18.dp)) {
-            Stat("要点", brief.wechatPoints.size)
-            Stat("必做", brief.memoStatus.pendingDaily.size)
-            Stat("待办", brief.memoStatus.pendingTemp.size)
-            Stat("推荐", brief.recommendations.size)
-        }
-        if (brief.wechatPoints.isNotEmpty()) {
-            Text("消息要点", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
-            brief.wechatPoints.forEach { p ->
-                Text(
-                    "· ${p.conv.ifBlank { "未标注会话" }}：${p.point}",
-                    style = MaterialTheme.typography.bodySmall,
-                )
-            }
-        }
-        if (brief.plan.timeline.isNotEmpty()) {
-            Text("时间线", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
-            brief.plan.timeline.forEach { t ->
-                Text("${t.time} · ${t.title}", style = MaterialTheme.typography.bodySmall)
-            }
-        }
-        if (brief.recommendations.isNotEmpty()) {
-            Text("智能推荐", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
-            brief.recommendations.forEach { r ->
-                Text("· ${r.text}（${r.reason}）", style = MaterialTheme.typography.bodySmall)
-            }
-        }
-        brief.tomorrow?.let { tm ->
-            if (tm.todos.isNotEmpty()) {
-                Text("明天", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
-                tm.todos.forEach { Text("· ${it.text}", style = MaterialTheme.typography.bodySmall) }
-            }
-        }
-        if (brief.risks.isNotEmpty()) {
-            Text("风险", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
-            brief.risks.forEach { Text("· $it", style = MaterialTheme.typography.bodySmall) }
-        }
-    }
-}
-
-@Composable
-private fun Stat(label: String, value: Int) {
-    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        Text(value.toString(), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-        Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-    }
-}
-
 private fun summaryOf(slices: List<BriefSliceEntity>): String {
     val ok = slices.filter { it.state == "OK" }
     if (ok.isEmpty()) return ""
     val points = ok.sumOf { it.newCount }
-    return "共 ${ok.size} 条片段 · 新增 $points 项"
+    return "共 ${ok.size} 条片段 · 读了 $points 条新消息"
 }
 
 private fun triggerLabel(trigger: String): String = when (trigger) {
@@ -402,4 +392,48 @@ private fun nextAutoText(): String {
     val next = slots.firstOrNull { it.isAfter(now) } ?: slots.first()
     val prefix = if (next.isAfter(now)) "" else "明天 "
     return "$prefix${"%02d:%02d".format(next.hour, next.minute)}"
+}
+
+/**
+ * 数据新鲜度条：直接回答「为什么简报里没有新东西」。
+ * 三种状态分开显示——没授权 / 授权了但服务没绑上 / 有服务但确实没新通知，
+ * 用户不会再把「采不到」误当成「AI 总结得不对」。
+ */
+@Composable
+private fun FreshnessStrip(
+    freshness: com.infoagent.data.repo.Freshness,
+    onGrant: () -> Unit,
+    onReconnect: () -> Unit,
+) {
+    val blocked = !freshness.listenerOn || !freshness.connected
+    Surface(
+        color = if (blocked) {
+            MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.55f)
+        } else {
+            MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f)
+        },
+        shape = RoundedCornerShape(12.dp),
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+    ) {
+        Row(Modifier.padding(horizontal = 10.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text(
+                    freshness.summary(),
+                    style = MaterialTheme.typography.labelMedium,
+                    color = if (blocked) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Text(
+                    "今日已采 ${freshness.todayCount} 条" +
+                        (freshness.lastIngestAt?.let { " · 最近入库 ${clock(it)}" } ?: ""),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            if (!freshness.listenerOn) {
+                TextButton(onClick = onGrant) { Text("去开启", style = MaterialTheme.typography.labelSmall) }
+            } else if (!freshness.connected) {
+                TextButton(onClick = onReconnect) { Text("重新连接", style = MaterialTheme.typography.labelSmall) }
+            }
+        }
+    }
 }

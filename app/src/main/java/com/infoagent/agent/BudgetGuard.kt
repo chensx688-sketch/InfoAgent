@@ -19,10 +19,14 @@ class BudgetGuard(
         const val USE_FOLLOWUP = "followup"
         const val USE_MANUAL = "manual"
 
+        /** 外部信息「查什么」的规划请求：独立额度，不与简报额度抢 */
+        const val USE_ENRICH = "enrich"
+
         val DAILY_LIMITS = mapOf(
             USE_AUTO_MEMO to 8L,
             USE_BRIEF to 3L,
             USE_MEMORY to 2L,
+            USE_ENRICH to 8L,
         )
         const val MANUAL_DAILY_LIMIT = 10L
         const val FOLLOWUP_TOKEN_LIMIT = 8_000L

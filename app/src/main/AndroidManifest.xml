@@ -7,6 +7,8 @@
     <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
     <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
 
     <!-- Permission 类位于采集层前的声明说明见 CHANGELOG：
          NotificationListener/Worker/前台服务随对应阶段随类声明，不建空占位类。 -->
@@ -55,5 +57,11 @@
                 <action android:name="android.service.notification.NotificationListenerService" />
             </intent-filter>
         </service>
+        <!-- 采集保活：常驻通知，防止进程被省电策略冻结导致监听静默断开（用户可关） -->
+        <service
+            android:name=".capture.CaptureKeepAliveService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync"
+            android:label="@string/app_name" />
     </application>
 </manifest>

@@ -161,6 +161,56 @@ class MigrationTest {
         }
     }
 
+    @Test
+    fun `v5 到 v6 老记忆按 created_at 补 valid_from 且仍然有效`() = runBlocking {
+        val file = context.getDatabasePath("migration-v5.db")
+        file.parentFile?.mkdirs()
+        if (file.exists()) file.delete()
+
+        val schema5 = org.json.JSONObject(readResource("schemas/5.json"))
+        val raw = android.database.sqlite.SQLiteDatabase.openOrCreateDatabase(file, null)
+        val entities = schema5.getJSONObject("database").getJSONArray("entities")
+        for (i in 0 until entities.length()) {
+            val entity = entities.getJSONObject(i)
+            val table = entity.getString("tableName")
+            fun realSql(sql: String) = sql.replace("\${TABLE_NAME}", table)
+            raw.execSQL(realSql(entity.getString("createSql")))
+            val indices = entity.optJSONArray("indices") ?: continue
+            for (j in 0 until indices.length()) {
+                raw.execSQL(realSql(indices.getJSONObject(j).getString("createSql")))
+            }
+        }
+        // 一条 v5 时代的老记忆：只知道自己是什么时候写进来的，不知道有效期
+        raw.execSQL(
+            "INSERT INTO memory_fact (category, subject, fact_text, confidence, evidence_count, " +
+                "feedback_sum, last_seen, source_refs, period_hint, status, created_at, updated_at) " +
+                "VALUES ('HABIT', '健身', '每周健身两次', 50, 1, 0, 1700000000000, '', NULL, 'ACTIVE', 1700000000000, 1700000000000)",
+        )
+        val identity = schema5.getJSONObject("database").getString("identityHash")
+        raw.execSQL("CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY, identity_hash TEXT)")
+        raw.execSQL("INSERT OR REPLACE INTO room_master_table (id, identity_hash) VALUES(42, '$identity')")
+        raw.version = 5
+        raw.close()
+
+        val opened = InfoAgentDatabase.build(context, "migration-v5.db")
+        try {
+            val columns = mutableListOf<String>()
+            opened.openHelper.readableDatabase.query("PRAGMA table_info(memory_fact)").use { cursor ->
+                while (cursor.moveToNext()) columns += cursor.getString(cursor.getColumnIndexOrThrow("name"))
+            }
+            assertTrue("v6 应补出 valid_from", "valid_from" in columns)
+            assertTrue("v6 应补出 valid_to", "valid_to" in columns)
+
+            val fact = opened.memoryDao().allFacts().first()
+            assertEquals("valid_from 应按 created_at 回填", 1_700_000_000_000L, fact.validFrom)
+            assertTrue("老记忆默认仍然有效", fact.validTo == null)
+            assertEquals("迁移后仍进注入列表", 1, opened.memoryDao().topActiveFacts(5).size)
+        } finally {
+            opened.close()
+            file.delete()
+        }
+    }
+
     private fun readResource(path: String): String =
         javaClass.classLoader!!.getResourceAsStream(path)!!.bufferedReader().use { it.readText() }
 }

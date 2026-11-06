@@ -27,6 +27,10 @@ interface MessageDao {
     @Query("SELECT COUNT(*) FROM wechat_message WHERE ts >= :from")
     suspend fun countSince(from: Long): Long
 
+    /** 最新一条消息的时间（0=没有消息）：用来判断「监听还活着吗、数据新不新」 */
+    @Query("SELECT MAX(ts) FROM wechat_message")
+    suspend fun maxTs(): Long?
+
     @Query("SELECT * FROM wechat_message WHERE dedup_key = :key LIMIT 1")
     suspend fun findByDedupKey(key: String): WechatMessageEntity?
 
@@ -82,8 +86,38 @@ interface MessageDao {
     @Query("SELECT peer_id AS peerId, COUNT(*) AS cnt FROM wechat_message GROUP BY peer_id")
     fun observeCountsByPeer(): kotlinx.coroutines.flow.Flow<List<PeerCount>>
 
+    /** 简报可视化：某天 0–23 点每小时的入站消息量（按本机时区取小时） */
+    data class HourCount(
+        @androidx.room.ColumnInfo(name = "hr") val hour: Int,
+        @androidx.room.ColumnInfo(name = "cnt") val cnt: Long,
+    )
+
+    @Query(
+        "SELECT CAST(strftime('%H', ts / 1000, 'unixepoch', 'localtime') AS INTEGER) AS hr, " +
+            "COUNT(*) AS cnt FROM wechat_message " +
+            "WHERE ts >= :from AND ts < :to GROUP BY hr ORDER BY hr ASC",
+    )
+    suspend fun hourlyCounts(from: Long, to: Long): List<HourCount>
+
+    /** 简报可视化：某天各会话的消息量（Top N，用于会话热度条） */
+    @Query(
+        "SELECT peer_id AS peerId, COUNT(*) AS cnt FROM wechat_message " +
+            "WHERE ts >= :from AND ts < :to GROUP BY peer_id ORDER BY cnt DESC LIMIT :limit",
+    )
+    suspend fun countsByPeerBetween(from: Long, to: Long, limit: Int): List<PeerCount>
+
     @Query("SELECT * FROM wechat_message WHERE id IN (:ids) ORDER BY ts ASC")
     suspend fun byIds(ids: List<Long>): List<WechatMessageEntity>
+
+    /**
+     * 简报要点跳回原话时，给目标消息补上下文（前后各一段时间内的同会话消息）。
+     * 只取这一段时间窗，避免把整段长会话读进内存。
+     */
+    @Query(
+        "SELECT * FROM wechat_message WHERE peer_id = :peerId AND ts BETWEEN :from AND :to " +
+            "ORDER BY ts ASC LIMIT 80",
+    )
+    suspend fun aroundPeer(peerId: String, from: Long, to: Long): List<WechatMessageEntity>
 
     // 撤回匹配候选（§8.8：同会话、同 sender、方向 IN、时间窗 2 分钟）
     @Query(
@@ -121,6 +155,14 @@ interface MessageDao {
 
     @Query("SELECT * FROM conversation ORDER BY COALESCE(last_ts,0) DESC")
     fun observeConversations(): Flow<List<ConversationEntity>>
+
+    /** 采集范围开关：muted=1 表示这个会话不收（NotificationListenerService 直接丢） */
+    @Query("UPDATE conversation SET muted = :muted WHERE peer_id = :peerId")
+    suspend fun setConversationMuted(peerId: String, muted: Long)
+
+    /** 不采集的会话：生成简报时也要把这些会话的历史消息滤掉 */
+    @Query("SELECT peer_id FROM conversation WHERE muted = 1")
+    suspend fun mutedPeers(): List<String>
 
     @Query("SELECT * FROM conversation WHERE peer_id = :peerId LIMIT 1")
     suspend fun conversation(peerId: String): ConversationEntity?

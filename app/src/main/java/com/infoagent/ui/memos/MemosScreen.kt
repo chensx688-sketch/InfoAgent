@@ -6,6 +6,7 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.Arrangement
@@ -20,8 +21,10 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.draw.clip
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.AutoAwesome
@@ -62,6 +65,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.infoagent.data.db.MemoItemEntity
+import com.infoagent.ui.util.TimeFormat
 import com.infoagent.ui.theme.AiGradientEnd
 import com.infoagent.ui.theme.AiGradientStart
 import com.infoagent.ui.theme.WeChatGreen
@@ -78,6 +82,8 @@ fun MemosScreen(vm: MemosViewModel = viewModel()) {
     val daily by vm.daily.collectAsState(initial = emptyList())
     val stage by vm.stage.collectAsState(initial = emptyList())
     val temp by vm.temp.collectAsState(initial = emptyList())
+    val facts by vm.facts.collectAsState(initial = emptyList())
+    var showExpired by remember { mutableStateOf(false) }
 
     var editorVisible by remember { mutableStateOf(false) }
     var editingKind by remember { mutableStateOf("TEMP") }
@@ -180,6 +186,55 @@ fun MemosScreen(vm: MemosViewModel = viewModel()) {
                         if (delta > 0 && index < temp.lastIndex) vm.moveDown(item.id)
                     },
                 )
+            }
+            // ---- 长期记忆（DB v6：只增 + 时间有效性）----
+            item {
+                val active = facts.count { it.validTo == null && it.status != "DISMISSED" }
+                SectionHeaderPlain(
+                    title = "长期记忆",
+                    subtitle = if (active == 0) "AI 从消息里记下的稳定事实会出现在这里" else "$active 条有效 · 生成简报时会带上",
+                )
+            }
+            run {
+                val active = facts.filter { it.validTo == null && it.status != "DISMISSED" }
+                if (active.isEmpty()) {
+                    item { SectionEmpty("还没攒出记忆。多用几天，并对简报里的建议点几次 👍/👎，这里就会长出你的偏好和规律") }
+                }
+                items(active, key = { "m-${it.id}" }) { fact ->
+                    MemoryRow(
+                        fact = fact,
+                        onExpire = { vm.expireFact(fact.id) },
+                        onUp = { vm.feedbackFact(fact.id, true) },
+                        onDown = { vm.feedbackFact(fact.id, false) },
+                    )
+                }
+            }
+            run {
+                val expired = facts.filter { it.validTo != null }
+                if (expired.isNotEmpty()) {
+                    item {
+                        Text(
+                            if (showExpired) "已过期 ${expired.size} 条 · 收起" else "已过期 ${expired.size} 条 · 展开",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { showExpired = !showExpired }
+                                .padding(horizontal = 20.dp, vertical = 10.dp),
+                        )
+                    }
+                    if (showExpired) {
+                        items(expired, key = { "e-${it.id}" }) { fact ->
+                            MemoryRow(
+                                fact = fact,
+                                expired = true,
+                                onExpire = { vm.restoreFact(fact.id) },
+                                onUp = { vm.feedbackFact(fact.id, true) },
+                                onDown = { vm.feedbackFact(fact.id, false) },
+                            )
+                        }
+                    }
+                }
             }
             item { Spacer(Modifier.height(28.dp)) }
         }
@@ -474,4 +529,94 @@ private fun MemoEditorDialog(
         confirmButton = { TextButton(onClick = { onConfirm(textValue, timeValue) }) { Text("保存") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
     )
+}
+
+/** 不带「+」的段标题：长期记忆是 AI 生成的，不该让用户手动加 */
+@Composable
+private fun SectionHeaderPlain(title: String, subtitle: String) {
+    Column(Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, top = 22.dp, bottom = 6.dp)) {
+        Text(title, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+        Text(
+            subtitle,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(top = 2.dp),
+        )
+    }
+}
+
+/**
+ * 一条长期记忆。
+ *
+ * 简洁的取舍：只显示「分类 + 事实 + 从哪天起」，证据条数放在第二行的浅灰里，
+ * 三个动作（过期/有用/不对）收进 ⋮ 菜单，不占正文视线。
+ */
+@Composable
+private fun MemoryRow(
+    fact: com.infoagent.data.db.MemoryFactEntity,
+    expired: Boolean = false,
+    onExpire: () -> Unit,
+    onUp: () -> Unit,
+    onDown: () -> Unit,
+) {
+    var menu by remember { mutableStateOf(false) }
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 2.dp)
+            .clip(RoundedCornerShape(14.dp))
+            .padding(horizontal = 8.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.Top,
+    ) {
+        Text(
+            memoryCategoryLabel(fact.category),
+            style = MaterialTheme.typography.labelSmall,
+            color = if (expired) MaterialTheme.colorScheme.onSurfaceVariant
+            else MaterialTheme.colorScheme.primary,
+            modifier = Modifier
+                .padding(top = 2.dp)
+                .clip(RoundedCornerShape(6.dp))
+                .padding(horizontal = 6.dp, vertical = 1.dp),
+        )
+        Column(Modifier.weight(1f).padding(start = 8.dp)) {
+            Text(
+                fact.factText.orEmpty(),
+                style = MaterialTheme.typography.bodyMedium,
+                color = if (expired) MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f)
+                else MaterialTheme.colorScheme.onSurface,
+                textDecoration = if (expired) androidx.compose.ui.text.style.TextDecoration.LineThrough else null,
+            )
+            Text(
+                buildString {
+                    append(if (expired) "已失效" else "自 ${TimeFormat.dayLabel(fact.validFrom)} 起")
+                    if (fact.evidenceCount > 1) append(" · 出现 ${fact.evidenceCount} 次")
+                    if (fact.confidence in 1..100) append(" · 可信 ${fact.confidence}")
+                },
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 2.dp),
+            )
+        }
+        Box {
+            IconButton(onClick = { menu = true }, modifier = Modifier.size(28.dp)) {
+                Text("⋯", style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                DropdownMenuItem(
+                    text = { Text(if (expired) "恢复（其实还有效）" else "这条过期了") },
+                    onClick = { menu = false; onExpire() },
+                )
+                DropdownMenuItem(text = { Text("有用") }, onClick = { menu = false; onUp() })
+                DropdownMenuItem(text = { Text("不太对") }, onClick = { menu = false; onDown() })
+            }
+        }
+    }
+}
+
+private fun memoryCategoryLabel(category: String): String = when (category) {
+    "PREFERENCE" -> "偏好"
+    "HABIT" -> "习惯"
+    "PATTERN" -> "规律"
+    "RELATION" -> "关系"
+    else -> "记忆"
 }

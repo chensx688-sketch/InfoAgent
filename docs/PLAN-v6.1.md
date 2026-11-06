@@ -159,12 +159,26 @@ FTS 同步机制（P0-1，应用层写入）：`*_tokens` 为影子列（主表�
 - 8.1 契约仓库：`app/src/main/assets/contracts/`（auto_memo_v1 / brief_v1 / memory_v1 / followup_v1 `.schema.json`，运行时与 CI 同源）；逐字段类型/枚举/可空/最大长度；评估集 20 条 + CI mock 十场景；SafeParser 流式增量校验（可部分渲染字段合法即渲染，关键枚举非法丢段+标记；整契约失败→原文缓存+Markdown 回退+徽标）；BusinessValidator 后置（due 过去/source_msg_ids 不存在/memory_refs→DISMISSED → 标记不崩）。
 - 8.2 自动整理：末消息后 5 分钟防抖或简报前，批 ≤20；请求行 `[#123][HH:mm] 发送者: 内容(会话)`，消息内容 JSON 字符串传入+系统提示声明不可信；响应 `{items:[{title≤120, due, urgency:ENUM, source_msg_ids:[int]}], skip}`；memo_source 全量关联；标题规范化 hash+7 天未完成去重；来源回填自消息表。
 - 8.3 简报：上午=前日22:00–10:00 / 下午=10:00–13:30 / 晚间=13:30–22:00；MANUAL=0:00–now 独立 run；输入=窗口消息按会话+今日备忘快照+`biz_date-1` 归档完成率+Top≤10 记忆（confidence 降序、排除 DISMISSED、并列取 last_seen 新者）+链接聚合清单；timeline.date 跨天必带；`memo_status.done`=当日完成计数。
+  - `window` / `generated_at` 由**客户端注入**（v1.4.3，prompt `brief_p5`）：模型不回显，回显写错不再算失败；请求窗口优先。
+  - 提示词卫生：不许出现契约外字段（如 `continued`）、不许写死地点/日期例子、`BRIEF_SYSTEM` ≤2200 字符；由 `PromptContractTest` 守。
 - 8.4 追问：契约 followup_v1{role, content, ts, refs}；截断=最近 4 轮+该段简报全文+当日摘要按优先级；预算=每日 8k token；超限 UI「今日追问 token 额度已用完（8k）」。
 - 8.5 记忆：`confidence = clamp(50 + 8×log2(1+evidence_count) + Σfeedback − decay×days_since_last_seen, 0, 100)`（decay=2）；evidence 仅同 subject 新证据 +1 且每次命中 `last_seen=now`；DISMISSED 后 evidence 冻结；重提需新证据 ≥2 且 confidence>40；subject 规范化=小写/去空格/同义词表；👍+2/👎−5；refs 存 id 失效不删；card 级反馈落 `brief_feedback`。
-- 8.6 预算/失败：日预算=自动整理 8 / 简报 3 / 记忆 2 / 追问 8k token（可配）；手动日上限 10 次（不计自动预算但记账）；重试计入；401→停自动+PENDING 标 MISSED(AUTH)+修 key 后「补跑今日简报」；429→释锁+WAITING_RETRY+退避 ≤3 共享 `retry_after_until`；5xx/超时→重试 1 次+stale 缓存；降级链=`model_route`（整理 tier1/简报记忆 tier2/追问 tier3），429/预算紧张降级备用模型；能力不符走文本分支。
+  - **只增 + 时间有效性（v1.4.4 / DB v6）**：`memory_fact` 加 `valid_from`（何时开始为真）、`valid_to`（何时失效，null=仍有效）+ `(subject, valid_to)` 索引；老数据 `valid_from=created_at`、默认有效。
+    写入不再覆盖：同一件事再出现 → 累加证据；**事情变了 → 旧行 `valid_to=now`、新事实另起一行**（历史可查，判断挪到取用侧）。
+    「是否同一件事」分类型：`PREFERENCE`/`HABIT` 变了就换新值；`RELATION`/`PATTERN` 用二元组重合度 ≥0.6 判定"只是说得更细"，按同一件事累加。
+    注入只取 `valid_to IS NULL`；失效项在「备忘 → 长期记忆 → 已过期」折叠展示，可一键恢复（`restore`）。理由：mem0 2026 版已把 UPDATE/DELETE 砍成 ADD-only，Graphiti 也是"旧边失效不删"——写入时不判生死，取用时排序。- 8.6 预算/失败：日预算=自动整理 8 / 简报 3 / 记忆 2 / 追问 8k token（可配）；手动日上限 10 次（不计自动预算但记账）；重试计入；401→停自动+PENDING 标 MISSED(AUTH)+修 key 后「补跑今日简报」；429→释锁+WAITING_RETRY+退避 ≤3 共享 `retry_after_until`；5xx/超时→重试 1 次+stale 缓存；降级链=`model_route`（整理 tier1/简报记忆 tier2/追问 tier3），429/预算紧张降级备用模型；能力不符走文本分支。
 - 8.7 缓存键：`input_hash = sha256(canonicalJson{biz_date, window, contract_version, prompt_version, model, temperature, max_tokens, sorted_msg{id, dedup_key, content_hash/*=sha256(content)*/, recalled, last_ts}, memo_snapshot, top_facts})`；消息内容不可编辑（v1 仅撤回改 recalled）；未来编辑则更新 content_hash 并失效缓存。
 - 8.8 解析/对账：合并通知逐行拆解（BIG_TEXT）·群聊 `发送者: ` 前缀·@引用前缀保留·媒体占位符·撤回正则·hash 幂等；折叠通知无正文→占位行「N 条新消息（需打开微信查看）」不生成 AI 备忘；撤回匹配=同会话+sender 同+direction=IN+同 msg_type+≤2 分钟窗，否则记系统行不猜；关键词规则变更→重扫近 30 天置 flagged；对账前检查监听连接，断连跳过并记 `LISTENER_DISCONNECTED`+UI 提示。
-- 8.9 成本/截断：优先级=关注会话>「带时间」（时间正则表：`\d{1,2}[:：]\d{2}`、上午/下午/中午/晚上/明天/周X/日期，或 due 已提取）>今日消息>其他；超长群聊分块摘要；max_tokens=简报 2048/提取 512/记忆 1024/追问 1024；单价可配+日估算+agent_trace 对账。
+- 8.9 成本/截断：优先级=关注会话>「带时间」（时间正则表：`\d{1,2}[:：]\d{2}`、上午/下午/中午/晚上/明天/周X/日期，或 due 已提取）>今日消息>其他；超长群聊分块摘要；max_tokens=简报 **3072**（2048 装不下 advice+topics+refs，v1.4.2 上调）/提取 512/记忆 1024/追问 1024；单价可配+日估算+agent_trace 对账。
+  - 截断处理（v1.4.2）：客户端读 `finish_reason`；`length` 视为「被截断」而非「格式不合法」→ 自动把 max_tokens 翻倍重试 1 次（上限 8192）；解析侧做**截断自愈**（补未闭合引号/括号、必要时丢半个成员再闭合），`memo_status`/`plan` 缺失降级为空+warning，不让整份简报作废。报错文案必须能指导动作（调大 max_tokens / 换非推理模型 / 回显模型开头原话）。
+- 8.10 外部信息（v1.4 起）：简报生成前「查证」一次，用的是**用户自己的** key（和风天气 + 搜索服务，均可在设置里填，也可关）。
+  - 顺序：聊天素材 →（模型，temperature=0，max_tokens=300）输出查询计划 `{places:[{city,date,why}], queries:[…]}` → 天气/搜索（带缓存）→ 事实行 → 作为【外部信息】进入主 prompt。
+  - 契约 `ENRICH_PLAN`：places≤2（必须带 yyyy-MM-dd，缺日期不查）、queries≤2；不查隐私（手机号/住址/证件）；消息里没提到的城市不许写。
+  - 缓存：查询计划 40 分钟、同城市+同日期天气 3 小时、同查询搜索 12 小时，落 `enrich_cache`（v5 表，7 天清理）——防止连点「补一份」烧用户额度。
+  - 硬约束：查不到就不写（返回空 facts，主 prompt 里不出现【外部信息】节），**绝不假装联网**；模型引用外部事实必须带地点与时间、不许改写数字；与消息冲突时以消息为准并在 watch 标注。
+  - 透明可核：本次用到的事实写进 `brief_slice.context_json`（v5 列），UI 可展示「这条简报参考了什么」。
+  - 生活指数只取与出行/穿衣相关的 8 类（穿衣/紫外线/雨伞/舒适度/交通/旅游/运动/过敏），其余丢弃，避免简报里堆无用信息。
+  - 契约版本：`brief_v3`（v1 纯消息要点 → v2 加 advice/refs → v3 加 topics 按事项聚合），资产同目录同步。
 
 ## 9. 通知与岛
 

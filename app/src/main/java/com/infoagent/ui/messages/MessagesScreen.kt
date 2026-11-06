@@ -27,8 +27,11 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.ContentPaste
 import androidx.compose.material.icons.outlined.Search
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.Button
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -63,6 +66,22 @@ import com.infoagent.data.db.WechatMessageEntity
 import com.infoagent.ui.theme.WeChatGreen
 import com.infoagent.ui.util.TimeFormat
 import kotlinx.coroutines.launch
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material.icons.outlined.KeyboardArrowDown
+import androidx.compose.material.icons.outlined.List
+import androidx.compose.material.icons.outlined.ContentCopy
+import androidx.compose.material.icons.outlined.Delete
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.unit.sp
+import androidx.compose.foundation.clickable
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.withStyle
+import androidx.compose.runtime.derivedStateOf
 
 /**
  * 消息页（FR-03）：采集状态卡 + 会话列表（头像色块/今日条数/今日要点）→ 消息流
@@ -72,6 +91,12 @@ import kotlinx.coroutines.launch
 @Composable
 fun MessagesScreen(vm: MessagesViewModel = viewModel()) {
     val context = LocalContext.current
+    // 界面上必须能看见版本号：不然装了哪一版全靠猜
+    val versionName = remember {
+        runCatching {
+            context.packageManager.getPackageInfo(context.packageName, 0).versionName
+        }.getOrNull() ?: ""
+    }
     val scope = rememberCoroutineScope()
     val clipboard = LocalClipboardManager.current
     val conversations by vm.conversations.collectAsState(initial = emptyList())
@@ -133,6 +158,10 @@ fun MessagesScreen(vm: MessagesViewModel = viewModel()) {
             lastOutcome = capture.lastOutcome,
             onRebind = { vm.rebindCapture() },
             onOpenSettings = { com.infoagent.capture.NotificationAccess.openSettings(context) },
+            keepAlive = capture.keepAlive,
+            message = capture.message,
+            onStartCapture = { vm.startBackgroundCapture() },
+            onStopKeepAlive = { vm.stopBackgroundCapture() },
         )
 
         Row(
@@ -145,6 +174,12 @@ fun MessagesScreen(vm: MessagesViewModel = viewModel()) {
                 modifier = Modifier.weight(1f),
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                versionName,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                modifier = Modifier.padding(end = 4.dp),
             )
             IconButton(onClick = {
                 searchOpen = !searchOpen
@@ -184,6 +219,7 @@ fun MessagesScreen(vm: MessagesViewModel = viewModel()) {
         when {
             searchOpen && query.isNotBlank() -> SearchResults(
                 results = searchResults,
+                query = query,
                 onOpen = { m ->
                     selectedPeer = m.peerId
                     searchOpen = false
@@ -196,6 +232,7 @@ fun MessagesScreen(vm: MessagesViewModel = viewModel()) {
                 peerId = selectedPeer!!,
                 peerName = selectedName,
                 point = convPoints[selectedPeer!!],
+                isGroup = conversations.firstOrNull { it.peerId == selectedPeer }?.isGroup == true,
                 onBack = { selectedPeer = null },
                 onToast = { toast = it },
                 onCopy = { clipboard.setText(AnnotatedString(it)) },
@@ -248,6 +285,10 @@ private fun CaptureStatusCard(
     lastOutcome: String,
     onRebind: () -> Unit,
     onOpenSettings: () -> Unit,
+    keepAlive: Boolean = false,
+    message: String? = null,
+    onStartCapture: () -> Unit = {},
+    onStopKeepAlive: () -> Unit = {},
 ) {
     Card(
         modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
@@ -295,17 +336,43 @@ private fun CaptureStatusCard(
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            Row {
-                TextButton(onClick = onRebind, enabled = !rebinding) {
-                    Text(if (rebinding) "重连中…" else "立即重连")
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                // 主操作：真的把采集跑起来（绑监听 + 起前台保活），并如实回报结果
+                Button(
+                    onClick = if (keepAlive) onStopKeepAlive else onStartCapture,
+                    enabled = !rebinding,
+                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 4.dp),
+                ) {
+                    Text(
+                        when {
+                            rebinding -> "正在启动…"
+                            keepAlive -> "已保活 · 点击停止"
+                            else -> "启动后台采集"
+                        },
+                        style = MaterialTheme.typography.labelLarge,
+                    )
                 }
-                TextButton(onClick = onOpenSettings) { Text("通知使用权设置") }
+                Spacer(Modifier.width(6.dp))
+                TextButton(onClick = onRebind, enabled = !rebinding) {
+                    Text(if (rebinding) "重连中…" else "立即重连", style = MaterialTheme.typography.labelMedium)
+                }
+                TextButton(onClick = onOpenSettings) {
+                    Text("通知使用权设置", style = MaterialTheme.typography.labelMedium)
+                }
             }
-            if (permission && !connected && !rebinding) {
+            message?.let {
                 Text(
-                    "若点「立即重连」仍无效：到「通知使用权设置」里把本应用关掉再打开即可恢复。",
+                    it,
                     style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.error,
+                    color = if (connected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
+                    modifier = Modifier.padding(top = 2.dp),
+                )
+            }
+            if (permission && !connected && !rebinding && message == null) {
+                Text(
+                    "若点「启动后台采集」仍无效：到「通知使用权设置」里把本应用关掉再打开即可恢复。",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
         }
@@ -448,95 +515,152 @@ private fun MessageDetail(
     peerId: String,
     peerName: String,
     point: String?,
+    isGroup: Boolean,
     onBack: () -> Unit,
     onToast: (String) -> Unit,
     onCopy: (String) -> Unit,
 ) {
     val messages by remember(peerId) { vm.messages(peerId) }.collectAsState(initial = emptyList())
     val color = avatarColor(peerName)
+    val listState = rememberLazyListState()
+    // 只在「离开底部」这个布尔值变化时重组，而不是每滚动一帧都重组
+    val showJumpToLatest by remember { derivedStateOf { listState.firstVisibleItemIndex > 2 } }
+    val scope = rememberCoroutineScope()
 
-    // 反向列表：在消息与更早消息跨天时插入日期分隔
-    val rows: List<Any> = remember(messages) {
-        val reversed = messages.asReversed()
-        val list = mutableListOf<Any>()
-        reversed.forEachIndexed { i, m ->
-            list.add(m)
-            val older = reversed.getOrNull(i + 1)
-            if (older == null || TimeFormat.dayLabel(older.ts) != TimeFormat.dayLabel(m.ts)) {
-                list.add(TimeFormat.dayLabel(m.ts))
-            }
-        }
-        list
+    // 分组规则在 ChatRows 里（有测试）；这里只负责把「时间升序的行」反过来喂给 reverseLayout
+    val rows = remember(messages, isGroup) { ChatRows.build(messages, isGroup).asReversed() }
+    val summary = remember(messages) {
+        val last = messages.maxByOrNull { it.ts }
+        if (last == null) "还没有消息" else "已加载 ${messages.size} 条 · 最近 ${TimeFormat.clock(last.ts)}"
     }
+    var pointExpanded by remember(point) { mutableStateOf(false) }
 
     Column(Modifier.fillMaxSize()) {
         Row(
-            Modifier.fillMaxWidth().padding(horizontal = 6.dp),
+            Modifier.fillMaxWidth().padding(start = 4.dp, end = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             IconButton(onClick = onBack) {
                 Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = "返回")
             }
             Box(
-                Modifier.size(28.dp).background(color.copy(alpha = 0.2f), RoundedCornerShape(9.dp)),
+                Modifier.size(32.dp).background(color.copy(alpha = 0.18f), RoundedCornerShape(10.dp)),
                 contentAlignment = Alignment.Center,
-            ) { Text(peerName.take(1), color = color, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.labelMedium) }
-            Spacer(Modifier.width(8.dp))
-            Text(peerName, style = MaterialTheme.typography.titleSmall)
-        }
-        if (!point.isNullOrBlank()) {
-            Surface(
-                color = MaterialTheme.colorScheme.primary.copy(alpha = 0.08f),
-                shape = RoundedCornerShape(12.dp),
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
-            ) {
+            ) { Text(peerName.take(1), color = color, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.labelLarge) }
+            Spacer(Modifier.width(10.dp))
+            Column(Modifier.weight(1f)) {
                 Text(
-                    "今日要点：$point",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                    peerName,
+                    style = MaterialTheme.typography.titleSmall,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    summary,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
                 )
             }
         }
-        LazyColumn(Modifier.fillMaxSize(), reverseLayout = true) {
-            items(rows) { row ->
-                when (row) {
-                    is String -> DaySeparator(row)
-                    is WechatMessageEntity -> MessageBubble(
-                        message = row,
-                        onMemo = {
-                            vm.turnIntoMemo(row)
-                            onToast("已转为临时事件备忘")
-                        },
-                        onCopy = { onCopy(row.content); onToast("已复制") },
-                        onDelete = { vm.deleteMessage(row.id); onToast("已删除（回收站可恢复）") },
+        // 今日要点：一行灰底小字，点一下展开——不再用主色块跟气泡抢视线
+        if (!point.isNullOrBlank()) {
+            Surface(
+                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
+                shape = RoundedCornerShape(10.dp),
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp),
+            ) {
+                Row(
+                    Modifier.clickable { pointExpanded = !pointExpanded }.padding(horizontal = 10.dp, vertical = 7.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        "今日要点",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        point,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = if (pointExpanded) 8 else 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f),
                     )
                 }
             }
-            // C11：分页加载更早的消息（反向列表里放在末尾 = 视觉最上方）
-            if (messages.size >= vm.pageSize(peerId) && vm.pageSize(peerId) < MessagesViewModel.MAX_PAGE_SIZE) {
-                item {
-                    TextButton(
-                        onClick = { vm.loadMore(peerId) },
-                        modifier = Modifier.fillMaxWidth(),
-                    ) { Text("加载更早的消息") }
+        }
+        Box(Modifier.fillMaxSize()) {
+            LazyColumn(state = listState, modifier = Modifier.fillMaxSize(), reverseLayout = true) {
+                itemsIndexed(rows, key = { index, _ -> "row$index" }) { _, row ->
+                    when (row) {
+                        is ChatRow.Separator -> TimeSeparator(row)
+                        is ChatRow.Msg -> MessageBubble(
+                            message = row.message,
+                            pos = row.pos,
+                            showSender = row.showSender,
+                            onMemo = {
+                                vm.turnIntoMemo(row.message)
+                                onToast("已转为临时事件备忘")
+                            },
+                            onCopy = { onCopy(row.message.content); onToast("已复制") },
+                            onDelete = { vm.deleteMessage(row.message.id); onToast("已删除（回收站可恢复）") },
+                        )
+                    }
+                }
+                // 分页加载更早的消息（反向列表里放在末尾 = 视觉最上方）
+                if (messages.size >= vm.pageSize(peerId) && vm.pageSize(peerId) < MessagesViewModel.MAX_PAGE_SIZE) {
+                    item {
+                        TextButton(onClick = { vm.loadMore(peerId) }, modifier = Modifier.fillMaxWidth()) {
+                            Text("加载更早的消息")
+                        }
+                    }
+                }
+            }
+            // 翻到上面去了才浮出「回到最新」，平时不占地方
+            if (showJumpToLatest) {
+                Box(
+                    Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(16.dp)
+                        .size(40.dp)
+                        .clip(CircleShape)
+                        .background(MaterialTheme.colorScheme.surfaceVariant)
+                        .clickable { scope.launch { listState.animateScrollToItem(0) } },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        Icons.Outlined.KeyboardArrowDown,
+                        contentDescription = "回到最新",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(22.dp),
+                    )
                 }
             }
         }
     }
 }
 
+/** 时间分隔：只留一行小字，没有胶囊底色，重量要明显轻于气泡 */
 @Composable
-private fun DaySeparator(label: String) {
-    Box(Modifier.fillMaxWidth().padding(vertical = 8.dp), contentAlignment = Alignment.Center) {
-        Surface(color = MaterialTheme.colorScheme.surfaceVariant, shape = RoundedCornerShape(10.dp)) {
-            Text(
-                label,
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(horizontal = 10.dp, vertical = 3.dp),
-            )
-        }
+private fun TimeSeparator(row: ChatRow.Separator) {
+    Box(Modifier.fillMaxWidth().padding(top = 16.dp, bottom = 4.dp), contentAlignment = Alignment.Center) {
+        Text(
+            listOfNotNull(row.day, row.time).joinToString(" "),
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f),
+        )
+    }
+}
+
+/** 只有一簇的最后一条带"尾巴"（收紧一个角），其余都是完整圆角——看起来才是一整段 */
+private fun bubbleShape(isOut: Boolean, pos: ChatRow.Pos): RoundedCornerShape {
+    val tail = pos == ChatRow.Pos.LAST || pos == ChatRow.Pos.SINGLE
+    return if (isOut) {
+        RoundedCornerShape(18.dp, 18.dp, if (tail) 6.dp else 18.dp, 18.dp)
+    } else {
+        RoundedCornerShape(18.dp, 18.dp, 18.dp, if (tail) 6.dp else 18.dp)
     }
 }
 
@@ -544,85 +668,100 @@ private fun DaySeparator(label: String) {
 @Composable
 private fun MessageBubble(
     message: WechatMessageEntity,
+    pos: ChatRow.Pos,
+    showSender: Boolean,
     onMemo: () -> Unit,
     onCopy: () -> Unit,
     onDelete: () -> Unit,
 ) {
+    // 撤回：整条换成一行动作说明，不留读不清的空泡
+    if (message.recalled == 1L) {
+        Box(Modifier.fillMaxWidth().padding(vertical = 6.dp), contentAlignment = Alignment.Center) {
+            Text(
+                if (message.direction == "OUT") "你撤回了一条消息" else "对方撤回了一条消息",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
+            )
+        }
+        return
+    }
+
     var menu by remember { mutableStateOf(false) }
-    val recalled = message.recalled == 1L
     val isOut = message.direction == "OUT"
     val bubbleColor = if (isOut) {
-        MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)
+        MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)
     } else {
         MaterialTheme.colorScheme.surfaceVariant
     }
-    val shape = if (isOut) {
-        RoundedCornerShape(16.dp, 16.dp, 4.dp, 16.dp)
-    } else {
-        RoundedCornerShape(16.dp, 16.dp, 16.dp, 4.dp)
-    }
+    val maxBubble = (LocalConfiguration.current.screenWidthDp * 0.78f).coerceAtMost(320f).dp
+    val typeLabel = ChatRows.typeLabel(message.msgType)
+
     Row(
-        Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 3.dp),
+        Modifier.fillMaxWidth().padding(
+            start = 12.dp,
+            end = 12.dp,
+            top = if (pos == ChatRow.Pos.FIRST || pos == ChatRow.Pos.SINGLE) 8.dp else 2.dp,
+            bottom = if (pos == ChatRow.Pos.LAST || pos == ChatRow.Pos.SINGLE) 6.dp else 2.dp,
+        ),
         horizontalArrangement = if (isOut) Arrangement.End else Arrangement.Start,
     ) {
         Column(horizontalAlignment = if (isOut) Alignment.End else Alignment.Start) {
-            Text(
-                buildString {
-                    if (message.sender.isNotEmpty() && message.sender != message.peerName) append("${message.sender} · ")
-                    append(TimeFormat.clock(message.ts))
-                },
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+            if (showSender) {
+                Text(
+                    message.sender,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(start = 4.dp, bottom = 2.dp),
+                )
+            }
             Box {
                 Surface(
-                    shape = shape,
-                    color = if (recalled) bubbleColor.copy(alpha = 0.4f) else bubbleColor,
+                    shape = bubbleShape(isOut, pos),
+                    color = bubbleColor,
                     modifier = Modifier
-                        .widthIn(max = 300.dp)
+                        .widthIn(max = maxBubble)
                         .combinedClickable(onClick = {}, onLongClick = { menu = true }),
                 ) {
-                    Column(Modifier.padding(horizontal = 12.dp, vertical = 9.dp)) {
-                        Text(
-                            text = message.content,
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = if (recalled) MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
-                            else MaterialTheme.colorScheme.onSurface,
-                        )
-                        if (recalled) {
+                    Column(Modifier.padding(horizontal = 13.dp, vertical = 9.dp)) {
+                        if (typeLabel != null) {
                             Text(
-                                "（已撤回，不进简报）",
+                                typeLabel,
                                 style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                color = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.padding(bottom = 2.dp),
                             )
                         }
-                        if (message.msgType != "text") {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Surface(
-                                    shape = RoundedCornerShape(8.dp),
-                                    color = MaterialTheme.colorScheme.primary.copy(alpha = 0.1f),
-                                ) {
-                                    Text(
-                                        message.msgType,
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = MaterialTheme.colorScheme.primary,
-                                        modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp),
-                                    )
-                                }
-                                Spacer(Modifier.width(6.dp))
-                                Text(
-                                    if (message.appSource == "qq") "QQ" else "微信",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = WeChatGreen,
-                                )
-                            }
+                        when {
+                            message.content.isNotBlank() -> Text(
+                                text = message.content,
+                                style = MaterialTheme.typography.bodyMedium.copy(fontSize = 15.sp, lineHeight = 21.sp),
+                                color = MaterialTheme.colorScheme.onSurface,
+                            )
+                            typeLabel == null -> Text(
+                                "（空消息）",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
                         }
                     }
                 }
                 DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                    DropdownMenuItem(text = { Text("转备忘录") }, onClick = { menu = false; onMemo() })
-                    DropdownMenuItem(text = { Text("复制") }, onClick = { menu = false; onCopy() })
-                    DropdownMenuItem(text = { Text("删除") }, onClick = { menu = false; onDelete() })
+                    DropdownMenuItem(
+                        leadingIcon = { Icon(Icons.Outlined.List, null, Modifier.size(18.dp)) },
+                        text = { Text("转备忘录") },
+                        onClick = { menu = false; onMemo() },
+                    )
+                    DropdownMenuItem(
+                        leadingIcon = { Icon(Icons.Outlined.ContentCopy, null, Modifier.size(18.dp)) },
+                        text = { Text("复制") },
+                        onClick = { menu = false; onCopy() },
+                    )
+                    HorizontalDivider()
+                    DropdownMenuItem(
+                        leadingIcon = { Icon(Icons.Outlined.Delete, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.error) },
+                        text = { Text("删除", color = MaterialTheme.colorScheme.error) },
+                        onClick = { menu = false; onDelete() },
+                    )
                 }
             }
         }
@@ -631,7 +770,7 @@ private fun MessageBubble(
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun SearchResults(results: List<WechatMessageEntity>, onOpen: (WechatMessageEntity) -> Unit) {
+private fun SearchResults(results: List<WechatMessageEntity>, query: String, onOpen: (WechatMessageEntity) -> Unit) {
     if (results.isEmpty()) {
         Box(Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -669,7 +808,39 @@ private fun SearchResults(results: List<WechatMessageEntity>, onOpen: (WechatMes
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
-                    Text(m.content, maxLines = 3, overflow = TextOverflow.Ellipsis)
+                    Text(
+                        highlightMatch(m.content, query),
+                        maxLines = 3,
+                        overflow = TextOverflow.Ellipsis,
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                }
+            }
+        }
+    }
+}
+/** 命中词高亮：搜索页只给卡片不给位置，等于让用户自己再找一遍 */
+@Composable
+private fun highlightMatch(text: String, query: String): AnnotatedString {
+    val mark = MaterialTheme.colorScheme.primary.copy(alpha = 0.16f)
+    return remember(text, query, mark) {
+        val needle = query.trim()
+        if (needle.isEmpty()) {
+            AnnotatedString(text)
+        } else {
+            buildAnnotatedString {
+                var from = 0
+                while (true) {
+                    val at = text.indexOf(needle, from, ignoreCase = true)
+                    if (at < 0) {
+                        append(text.substring(from))
+                        break
+                    }
+                    append(text.substring(from, at))
+                    withStyle(SpanStyle(background = mark)) {
+                        append(text.substring(at, at + needle.length))
+                    }
+                    from = at + needle.length
                 }
             }
         }

@@ -93,40 +93,36 @@ class MemoryPipeline(
     private suspend fun merge(item: MemoryItem): MergeResult {
         val subject = normalizer.normalize(item.subject ?: item.factText)
         val now = clock()
-        val existing = if (subject.isNotBlank()) db.memoryDao().factBySubject(subject) else null
+        val key = subject.ifBlank { item.factText.take(20) }
         val refs = item.refs.joinToString(",")
-        if (existing == null) {
-            db.memoryDao().insertFact(
-                MemoryFactEntity(
-                    category = item.category,
-                    subject = subject.ifBlank { item.factText.take(20) },
-                    factText = item.factText,
-                    confidence = MemoryMath.confidence(1, 0, 0.0).toLong(),
-                    evidenceCount = 1,
-                    lastSeen = now,
-                    sourceRefs = refs,
-                    periodHint = item.period?.let { JSONObject().put("freq", it.freq).put("weekday", it.weekday).put("time", it.time).toString() },
-                    status = "ACTIVE",
-                    createdAt = now,
-                    updatedAt = now,
-                ),
-            )
+        val dao = db.memoryDao()
+
+        // ① 同 subject 还有效的那条：要么是同一件事再被提到（累加证据），要么事情变了（旧行失效 + 新增）
+        val active = if (subject.isNotBlank()) dao.activeBySubject(subject) else null
+        if (active != null) {
+            if (sameFact(active.category, active.factText.orEmpty(), item.factText)) {
+                return accumulate(active, refs, now)
+            }
+            dao.supersede(active.id, now)
+            insertNew(item, subject, key, refs, now)
             return MergeResult.CREATED
         }
 
-        val days = ((now - (existing.lastSeen ?: now)).toDouble() / 86_400_000.0).coerceAtLeast(0.0)
-        val newEvidence = countNewEvidence(existing.sourceRefs, refs)
-        if (existing.status == "DISMISSED") {
-            return if (MemoryMath.canRevive(newEvidence, existing.evidenceCount.toInt(), feedbackSum(existing), days)) {
-                db.memoryDao().updateEvidence(
-                    existing.id,
+        // ② 没有有效行，但可能有一条被用户忽略过的：仍按「需要新证据才复活」处理
+        val latest = if (subject.isNotBlank()) dao.latestBySubject(subject) else null
+        if (latest != null && latest.status == "DISMISSED") {
+            val days = ((now - (latest.lastSeen ?: now)).toDouble() / 86_400_000.0).coerceAtLeast(0.0)
+            val newEvidence = countNewEvidence(latest.sourceRefs, refs)
+            return if (MemoryMath.canRevive(newEvidence, latest.evidenceCount.toInt(), feedbackSum(latest), days)) {
+                dao.updateEvidence(
+                    latest.id,
                     MemoryMath.confidence(
-                        existing.evidenceCount.toInt() + newEvidence,
-                        existing.feedbackSum.toInt(),
+                        latest.evidenceCount.toInt() + newEvidence,
+                        latest.feedbackSum.toInt(),
                         days,
                     ).toLong(),
-                    existing.evidenceCount + newEvidence,
-                    existing.feedbackSum,
+                    latest.evidenceCount + newEvidence,
+                    latest.feedbackSum,
                     now,
                 )
                 MergeResult.UPDATED
@@ -134,8 +130,24 @@ class MemoryPipeline(
                 MergeResult.SKIPPED
             }
         }
+        if (latest != null && sameFact(latest.category, latest.factText.orEmpty(), item.factText) &&
+            countNewEvidence(latest.sourceRefs, refs) <= 0
+        ) {
+            return MergeResult.SKIPPED
+        }
+
+        insertNew(item, subject, key, refs, now)
+        return MergeResult.CREATED
+    }
+
+    /** 同一件事又出现一次：只累加证据，不新增行（这不是"新事实"） */
+    private suspend fun accumulate(existing: MemoryFactEntity, refs: String, now: Long): MergeResult {
+        val newEvidence = countNewEvidence(existing.sourceRefs, refs)
         if (newEvidence <= 0) return MergeResult.SKIPPED
+        val days = ((now - (existing.lastSeen ?: now)).toDouble() / 86_400_000.0).coerceAtLeast(0.0)
         val evidence = existing.evidenceCount + newEvidence
+        val mergedRefs = listOf(existing.sourceRefs.orEmpty(), refs)
+            .filter { it.isNotBlank() }.joinToString(",")
         db.memoryDao().updateEvidence(
             existing.id,
             MemoryMath.confidence(evidence.toInt(), existing.feedbackSum.toInt(), days).toLong(),
@@ -143,7 +155,57 @@ class MemoryPipeline(
             existing.feedbackSum,
             now,
         )
+        db.memoryDao().addRefs(existing.id, mergedRefs, now)
         return MergeResult.UPDATED
+    }
+
+    private suspend fun insertNew(item: MemoryItem, subject: String, key: String, refs: String, now: Long) {
+        db.memoryDao().insertFact(
+            MemoryFactEntity(
+                category = item.category,
+                subject = key,
+                factText = item.factText,
+                confidence = MemoryMath.confidence(1, 0, 0.0).toLong(),
+                evidenceCount = 1,
+                lastSeen = now,
+                sourceRefs = refs,
+                periodHint = item.period?.let {
+                    JSONObject().put("freq", it.freq).put("weekday", it.weekday).put("time", it.time).toString()
+                },
+                status = "ACTIVE",
+                createdAt = now,
+                updatedAt = now,
+                validFrom = now,
+                validTo = null,
+            ),
+        )
+    }
+
+    /**
+     * 是不是「同一件事」。
+     *
+     * 分类型的理由：偏好/习惯变了就是变了（"不吃香菜" → "现在能吃了"），必须换新值；
+     * 关系/规律常常只是同一件事被说得更细（"他喜欢咖啡" → "他喜欢手冲咖啡"），
+     * 一律当新事实会让记忆表里塞满近义条目。
+     */
+    private fun sameFact(category: String, old: String, incoming: String): Boolean {
+        val a = old.trim()
+        val b = incoming.trim()
+        if (a.isEmpty() || b.isEmpty()) return true
+        if (a == b) return true
+        return when (category) {
+            "PREFERENCE", "HABIT" -> false
+            else -> overlap(a, b) >= 0.6
+        }
+    }
+
+    /** 二元组重合度：用作「说得更细」的近似判断，比编辑距离更能容忍中文改写 */
+    private fun overlap(a: String, b: String): Double {
+        fun grams(s: String) = if (s.length < 2) setOf(s) else s.windowed(2).toSet()
+        val ga = grams(a)
+        val gb = grams(b)
+        if (ga.isEmpty() || gb.isEmpty()) return 0.0
+        return ga.intersect(gb).size.toDouble() / minOf(ga.size, gb.size)
     }
 
     private fun countNewEvidence(oldRefs: String?, newRefs: String): Int {

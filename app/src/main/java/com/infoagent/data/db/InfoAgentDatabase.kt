@@ -33,8 +33,9 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         AgentLockEntity::class,
         NotificationIdMapEntity::class,
         BriefSliceEntity::class,
+        EnrichCacheEntity::class,
     ],
-    version = 3,
+    version = 6,
     exportSchema = true,
 )
 abstract class InfoAgentDatabase : RoomDatabase() {
@@ -45,6 +46,8 @@ abstract class InfoAgentDatabase : RoomDatabase() {
     abstract fun scheduleDao(): ScheduleDao
     abstract fun memoryDao(): MemoryDao
     abstract fun briefSliceDao(): BriefSliceDao
+
+    abstract fun enrichDao(): EnrichDao
 
     val ftsStore: MessageFtsStore by lazy { MessageFtsStore(this) }
 
@@ -129,6 +132,54 @@ abstract class InfoAgentDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * v3→v4：片段记录「覆盖到哪条消息 id」。
+         *
+         * 只加列，老片段 covered_max_id=0，pipeline 遇到 0 会退回按时间窗取数（兼容历史）；
+         * 新片段开始按 id 增量，时间戳异常/迟到投递的新消息不会再被水位线永久挡住。
+         */
+        val MIGRATION_3_4 = object : androidx.room.migration.Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE brief_slice ADD COLUMN covered_max_id INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
+        /**
+         * v4→v5：外部信息缓存表 + 片段记录「本次参考了什么」。
+         *
+         * context_json 存本次用到的外部事实（天气/搜索摘要），
+         * 一来下次渲染可以直接展示「这条简报参考了哪些实时数据」（透明可核），
+         * 二来模型换版本重新解析历史简报时不用重查、也不烧额度。
+         */
+        val MIGRATION_4_5 = object : androidx.room.migration.Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `enrich_cache` (" +
+                        "`cache_key` TEXT NOT NULL, `payload` TEXT NOT NULL, `ts` INTEGER NOT NULL, " +
+                        "PRIMARY KEY(`cache_key`))",
+                )
+                db.execSQL("ALTER TABLE brief_slice ADD COLUMN context_json TEXT NOT NULL DEFAULT ''")
+            }
+        }
+
+        /**
+         * v6：记忆从「覆盖式合并」改成「只增 + 时间有效性」。
+         *
+         * 加两列：valid_from（何时开始为真）、valid_to（何时失效，null=仍有效）。
+         * 老数据没有这两个信息，一律按「created_at 起就有效、至今有效」处理 —— 不做假精确。
+         */
+        val MIGRATION_5_6 = object : androidx.room.migration.Migration(5, 6) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE memory_fact ADD COLUMN valid_from INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE memory_fact ADD COLUMN valid_to INTEGER")
+                db.execSQL("UPDATE memory_fact SET valid_from = COALESCE(created_at, 0) WHERE valid_from = 0")
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_memory_fact_subject_valid_to` " +
+                        "ON `memory_fact` (`subject`, `valid_to`)",
+                )
+            }
+        }
+
         /** 统一入口：任何 builder 都必须挂 FTS 建表 Callback（P0-1） */
         fun build(context: Context, name: String): InfoAgentDatabase =
             Room.databaseBuilder(
@@ -136,7 +187,7 @@ abstract class InfoAgentDatabase : RoomDatabase() {
                 InfoAgentDatabase::class.java,
                 name,
             )
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
                 .addCallback(Callback)
                 .build()
 

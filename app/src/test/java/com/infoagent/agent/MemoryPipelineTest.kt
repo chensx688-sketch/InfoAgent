@@ -136,4 +136,56 @@ class MemoryPipelineTest {
         assertTrue(outcome is MemoryPipeline.Outcome.Nothing)
         assertEquals(0, client.calls)
     }
+
+    @Test
+    fun `事情变了旧事实只失效不删除`() = runBlocking {
+        db = InfoAgentDatabase.build(context, "mem-supersede.db")
+        seedMemos()
+        val client = FakeClient("""{"facts":[{"category":"HABIT","subject":"健身","fact_text":"每周至少健身两次","refs":["memo:1"]}]}""")
+        pipeline(client).run()
+        val first = db.memoryDao().topActiveFacts(10).first()
+
+        // 同一件事换了个说法（偏好/习惯变了）：旧行标失效，新事实另起一行 —— 只增
+        client.payload = """{"facts":[{"category":"HABIT","subject":"健身","fact_text":"现在改游泳，每周三次","refs":["memo:2"]}]}"""
+        pipeline(client).run()
+
+        val all = db.memoryDao().allFacts()
+        assertEquals("新旧两条都要留着", 2, all.size)
+        val old = all.first { it.id == first.id }
+        assertTrue("旧事实应被标记失效", old.validTo != null)
+        val active = db.memoryDao().topActiveFacts(10)
+        assertEquals("只有一条仍然有效", 1, active.size)
+        assertEquals("现在改游泳，每周三次", active.first().factText)
+        assertTrue("新事实带 valid_from", active.first().validFrom > 0L)
+    }
+
+    @Test
+    fun `关系说得更细时按同一件事累加而不是另起一条`() = runBlocking {
+        db = InfoAgentDatabase.build(context, "mem-refine.db")
+        seedMemos()
+        val client = FakeClient("""{"facts":[{"category":"RELATION","subject":"王总","fact_text":"王总负责采购","refs":["memo:1"]}]}""")
+        pipeline(client).run()
+        client.payload = """{"facts":[{"category":"RELATION","subject":"王总","fact_text":"王总负责采购和报价","refs":["memo:2"]}]}"""
+        pipeline(client).run()
+
+        val facts = db.memoryDao().topActiveFacts(10)
+        assertEquals("说得更细不该变成两条", 1, facts.size)
+        assertEquals("应累加证据", 2L, facts.first().evidenceCount)
+    }
+
+    @Test
+    fun `失效的记忆不再进简报注入`() = runBlocking {
+        db = InfoAgentDatabase.build(context, "mem-inject.db")
+        seedMemos()
+        val client = FakeClient("""{"facts":[{"category":"HABIT","subject":"健身","fact_text":"每周健身两次","refs":["memo:1"]}]}""")
+        pipeline(client).run()
+        val fact = db.memoryDao().topActiveFacts(10).first()
+        db.memoryDao().supersede(fact.id, 2_000_000_000_000L)
+
+        assertTrue("失效后不应出现在注入列表", db.memoryDao().topActiveFacts(10).isEmpty())
+        assertEquals("但历史仍可查", 1, db.memoryDao().expiredFacts(10).size)
+        // 恢复后重新可用
+        db.memoryDao().restore(fact.id, 2_000_000_000_001L)
+        assertEquals(1, db.memoryDao().topActiveFacts(10).size)
+    }
 }

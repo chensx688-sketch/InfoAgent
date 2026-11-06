@@ -25,6 +25,10 @@ interface BriefSliceDao {
     @Query("SELECT MAX(to_ts) FROM brief_slice WHERE biz_date = :bizDate AND state = 'OK'")
     suspend fun lastToTs(bizDate: String): Long?
 
+    /** v4 增量水位：本条日期下已覆盖到的最大消息 id（0/null 表示还没有按 id 覆盖过） */
+    @Query("SELECT MAX(covered_max_id) FROM brief_slice WHERE biz_date = :bizDate")
+    suspend fun maxCoveredId(bizDate: String): Long?
+
     @Query("SELECT COUNT(*) FROM brief_slice WHERE biz_date = :bizDate")
     suspend fun countByDay(bizDate: String): Int
 

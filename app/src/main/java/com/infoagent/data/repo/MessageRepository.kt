@@ -23,6 +23,8 @@ data class IncomingMessage(
 sealed interface IngestResult {
     data class Created(val id: Long) : IngestResult
     data class Duplicate(val id: Long) : IngestResult
+    /** 会话被用户设成「不采集」（conversation.muted=1）：直接丢弃，不入库 */
+    data object Muted : IngestResult
 }
 
 /**
@@ -36,6 +38,9 @@ class MessageRepository(private val db: InfoAgentDatabase) {
     private val dao = db.messageDao()
 
     suspend fun ingest(msg: IncomingMessage): IngestResult = db.withTransaction {
+        // 采集范围：用户点名「不收这个会话」时最先拦掉，省得先入库再清理
+        if (dao.conversation(msg.peerId)?.muted == 1L) return@withTransaction IngestResult.Muted
+
         val dedupKey = DedupKeys.messageDedupKey(
             appSource = msg.appSource,
             peerId = msg.peerId,

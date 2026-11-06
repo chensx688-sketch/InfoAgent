@@ -36,6 +36,10 @@ data class CaptureUiState(
     val lastOutcome: String = "",
     val todayCount: Long = 0L,
     val rebinding: Boolean = false,
+    /** 前台保活是否在跑（常驻通知） */
+    val keepAlive: Boolean = false,
+    /** 上一次动作的结果，直接给用户看（不美化） */
+    val message: String? = null,
 )
 
 class MessagesViewModel(app: Application) : AndroidViewModel(app) {
@@ -59,7 +63,39 @@ class MessagesViewModel(app: Application) : AndroidViewModel(app) {
             lastIngestAt = prefs.getLong(com.infoagent.capture.NotifyCaptureService.KEY_LAST_INGEST_AT, 0L),
             lastOutcome = prefs.getString(com.infoagent.capture.NotifyCaptureService.KEY_LAST_OUTCOME, "").orEmpty(),
             todayCount = db.messageDao().countSince(startOfDay),
+            keepAlive = com.infoagent.capture.CaptureKeepAliveService.isRunning(ctx),
+            message = _capture.value.message,
         )
+    }
+
+    /**
+     * 一键启动后台采集：真正把监听绑上 + 起前台保活，并把结果如实回报。
+     *
+     * 这是用户真正想要的按钮——不是「请求重绑一下」，而是「点了之后消息真的开始进」。
+     */
+    fun startBackgroundCapture() = viewModelScope.launch {
+        val ctx = getApplication<Application>()
+        _capture.update { it.copy(rebinding = true, message = null) }
+        val outcome = runCatching {
+            com.infoagent.capture.CaptureBootstrap.ensureConnected(ctx, keepAlive = true)
+        }.getOrElse { com.infoagent.capture.CaptureBootstrap.Outcome.StillDown("启动失败：${it.message?.take(80)}") }
+        val text = when (outcome) {
+            com.infoagent.capture.CaptureBootstrap.Outcome.NeedPermission ->
+                "还没开通知使用权：点「通知使用权设置」把我们勾上，回来再点这个按钮"
+            com.infoagent.capture.CaptureBootstrap.Outcome.AlreadyConnected -> "监听本来就在线，保活已开启"
+            com.infoagent.capture.CaptureBootstrap.Outcome.Connected -> "已连上并开启保活：之后微信/QQ 通知会静默入库"
+            is com.infoagent.capture.CaptureBootstrap.Outcome.StillDown -> outcome.hint
+        }
+        _capture.update { it.copy(rebinding = false, message = text) }
+        refreshCaptureState()
+    }
+
+    /** 停止保活（监听本身会继续由系统绑定，只是不再常驻保进程） */
+    fun stopBackgroundCapture() = viewModelScope.launch {
+        val ctx = getApplication<Application>()
+        com.infoagent.capture.CaptureKeepAliveService.stop(ctx)
+        _capture.update { it.copy(message = "已停止保活：系统仍可能在省电时冻结进程") }
+        refreshCaptureState()
     }
 
     /**

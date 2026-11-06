@@ -24,7 +24,8 @@ data class ApiConfig(
     val apiKey: String,
     val model: String,
     val temperature: Double = 0.3,
-    val maxTokens: Int = 2048,
+    /** 简报输出（怎么办/要点/时间线/推荐）用 2048 会被截断，默认给 3072 */
+    val maxTokens: Int = 3072,
 )
 
 data class ChatMessage(val role: String, val content: String)
@@ -33,6 +34,13 @@ data class ChatResult(
     val content: String,
     val tokensIn: Long = 0,
     val tokensOut: Long = 0,
+    /**
+     * 服务端给的结束原因：stop=正常结束，length=**被 max_tokens 截断**。
+     *
+     * 为什么要单独记录：截断和「模型不肯按 JSON 回答」在用户看来都是「解析失败」，
+     * 但处理方式完全不同——前者加长重试就能救回来，后者重试一百次也一样。
+     */
+    val finishReason: String? = null,
 )
 
 interface AgentClient {
@@ -198,13 +206,14 @@ class OpenAiCompatibleClient(
             if (!r.isSuccessful) throw ApiHttpException(r.code, "HTTP ${r.code}: ${r.body?.string()?.take(300)}")
             val text = r.body?.string().orEmpty()
             val obj = runCatching { JSONObject(text) }.getOrElse { throw IOException("响应非 JSON") }
-            val content = obj.optJSONArray("choices")?.optJSONObject(0)
-                ?.optJSONObject("message")?.optString("content").orEmpty()
+            val choice = obj.optJSONArray("choices")?.optJSONObject(0)
+            val content = choice?.optJSONObject("message")?.optString("content").orEmpty()
             val usage = obj.optJSONObject("usage")
             return ChatResult(
                 content = content,
                 tokensIn = usage?.optLong("prompt_tokens") ?: 0,
                 tokensOut = usage?.optLong("completion_tokens") ?: 0,
+                finishReason = choice?.optString("finish_reason")?.takeIf { it.isNotBlank() },
             )
         }
     }
@@ -219,6 +228,7 @@ class OpenAiCompatibleClient(
             val buffer = StringBuilder()
             var tokensOut = 0L
             var tokensIn = 0L
+            var finish: String? = null
             while (true) {
                 val line = source.readUtf8Line() ?: break
                 if (line.isEmpty() || !line.startsWith("data:")) continue // 丢弃 event-only/注释帧（D14）
@@ -230,14 +240,16 @@ class OpenAiCompatibleClient(
                     tokensIn = u.optLong("prompt_tokens", tokensIn)
                     tokensOut = u.optLong("completion_tokens", tokensOut)
                 }
-                val delta = chunk.optJSONArray("choices")?.optJSONObject(0)?.optJSONObject("delta")
+                val choice = chunk.optJSONArray("choices")?.optJSONObject(0)
+                choice?.optString("finish_reason")?.takeIf { it.isNotBlank() }?.let { finish = it }
+                val delta = choice?.optJSONObject("delta")
                 val piece = delta?.optString("content").orEmpty()
                 if (piece.isNotEmpty()) {
                     buffer.append(piece)
                     onDelta(piece)
                 }
             }
-            return ChatResult(buffer.toString(), tokensIn, tokensOut)
+            return ChatResult(buffer.toString(), tokensIn, tokensOut, finish)
         }
     }
 }

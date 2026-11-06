@@ -50,14 +50,19 @@ class BriefingWorker(context: Context, params: WorkerParameters) : CoroutineWork
                 updatedAt = System.currentTimeMillis(),
             ),
         )
-        val pipeline = BriefingPipeline(db, client, { settings.config() }) {
-            val slots = BriefingPrefs.slots(applicationContext)
-            com.infoagent.agent.BriefingPipeline.WindowBounds(
-                morningEnd = slots.first { it.window == "MORNING" }.let { it.hour * 60 + it.minute },
-                afternoonEnd = slots.first { it.window == "AFTERNOON" }.let { it.hour * 60 + it.minute },
-                eveningEnd = slots.first { it.window == "EVENING" }.let { it.hour * 60 + it.minute },
-            )
-        }
+        val pipeline = BriefingPipeline(
+            db = db,
+            client = client,
+            configProvider = { settings.config() },
+            boundsProvider = {
+                val slots = BriefingPrefs.slots(applicationContext)
+                com.infoagent.agent.BriefingPipeline.WindowBounds(
+                    morningEnd = slots.first { it.window == "MORNING" }.let { it.hour * 60 + it.minute },
+                    afternoonEnd = slots.first { it.window == "AFTERNOON" }.let { it.hour * 60 + it.minute },
+                    eveningEnd = slots.first { it.window == "EVENING" }.let { it.hour * 60 + it.minute },
+                )
+            },
+        ).withEnricher(com.infoagent.enrich.ContextEnricher.forApp(db, applicationContext))
         // B2：与自动整理共用 agent_lock；拿不到锁则等下一轮（避免并发调用抢配额）
         val owner = "brief-" + java.util.UUID.randomUUID()
         val run = com.infoagent.data.util.AgentLockGuard.withLock(db, owner) {

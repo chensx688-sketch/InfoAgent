@@ -1,0 +1,97 @@
+{
+  "$id": "brief_v3",
+  "$comment": "三段简报输出契约 v3（§8.3）。在 v2 上纯增量：新增 topics[]（按事项跨会话聚合）。老 payload 仍可解析。",
+  "type": "object",
+  "required": ["wechat_points"],
+  "properties": {
+    "window": {"type": "string", "enum": ["MORNING", "AFTERNOON", "EVENING", "MANUAL"], "$comment": "v1.4.3 起由客户端注入，模型不再输出（回显只会写错）"},
+    "generated_at": {"type": "string", "maxLength": 40, "$comment": "v1.4.3 起由客户端注入"},
+    "advice": {
+      "type": "array",
+      "maxItems": 3,
+      "$comment": "怎么办：对方在等什么 + 可直接发出的回复草稿 + 容易疏忽的细节",
+      "items": {
+        "type": "object",
+        "required": ["who", "ask", "kind"],
+        "properties": {
+          "who": {"type": "string", "maxLength": 60},
+          "ask": {"type": "string", "maxLength": 160},
+          "say": {"type": ["string", "null"], "maxLength": 400},
+          "why": {"type": ["string", "null"], "maxLength": 300},
+          "watch": {"type": "array", "maxItems": 5, "items": {"type": "string", "maxLength": 160}},
+          "kind": {"type": "string", "enum": ["reply", "prepare", "remind", "risk"]},
+          "due": {"type": ["string", "null"], "maxLength": 40},
+          "basis": {"type": ["string", "null"], "enum": ["原文", "常识", "推断", null], "maxLength": 20},
+          "refs": {"type": "array", "maxItems": 8, "items": {"type": "integer"}}
+        }
+      }
+    },
+    "topics": {
+      "type": "array",
+      "maxItems": 5,
+      "$comment": "按事项（合同/报价/招聘/行程…）跨会话聚合，refs 指向依据消息",
+      "items": {
+        "type": "object",
+        "required": ["name"],
+        "properties": {
+          "name": {"type": "string", "maxLength": 40},
+          "points": {"type": "array", "maxItems": 5, "items": {"type": "string", "maxLength": 200}},
+          "convs": {"type": "array", "maxItems": 6, "items": {"type": "string", "maxLength": 60}},
+          "state": {"type": "string", "enum": ["open", "done", "risk"]},
+          "refs": {"type": "array", "maxItems": 8, "items": {"type": "integer"}}
+        }
+      }
+    },    "wechat_points": {
+      "type": "array", "maxItems": 20, "required": true,
+      "items": {
+        "type": "object", "required": ["conv", "point"],
+        "properties": {
+          "conv": {"type": "string", "maxLength": 60},
+          "point": {"type": "string", "maxLength": 300},
+          "key_time": {"type": ["string", "null"], "maxLength": 40},
+          "refs": {"type": "array", "maxItems": 8, "items": {"type": "integer"}}
+        }
+      }
+    },
+    "memo_status": {
+      "type": "object", "required": ["done", "pending_daily", "pending_temp"],
+      "properties": {
+        "done": {"type": "integer", "minimum": 0},
+        "pending_daily": {"type": "array", "maxItems": 30, "items": {"type": "object", "properties": {"text": {"type": "string", "maxLength": 200}, "time": {"type": ["string", "null"], "maxLength": 40}}}},
+        "pending_temp": {"type": "array", "maxItems": 30, "items": {"type": "object", "properties": {"text": {"type": "string", "maxLength": 200}, "time": {"type": ["string", "null"], "maxLength": 40}}}}
+      }
+    },
+    "plan": {
+      "type": "object", "required": ["timeline"],
+      "properties": {
+        "timeline": {
+          "type": "array", "maxItems": 20, "required": true,
+          "items": {
+            "type": "object", "required": ["time", "title"],
+            "properties": {
+              "time": {"type": "string", "maxLength": 40},
+              "title": {"type": "string", "maxLength": 120},
+              "source": {"type": "string", "enum": ["memo", "chat", "memory", "other"]},
+              "detail": {"type": "string", "maxLength": 300},
+              "kind": {"type": "string", "enum": ["must", "maybe"]},
+              "date": {"type": ["string", "null"], "maxLength": 20}
+            }
+          }
+        },
+        "note": {"type": "string", "maxLength": 500}
+      }
+    },
+    "recommendations": {
+      "type": "array", "maxItems": 10,
+      "items": {"type": "object", "required": ["text"], "properties": {
+        "text": {"type": "string", "maxLength": 200},
+        "reason": {"type": "string", "maxLength": 200},
+        "memory_refs": {"type": "array", "maxItems": 5, "items": {"type": "integer"}}
+      }}
+    },
+    "tomorrow": {"type": ["object", "null"], "properties": {
+      "todos": {"type": "array", "maxItems": 20, "items": {"type": "object", "properties": {"title": {"type": "string", "maxLength": 120}, "time": {"type": ["string", "null"], "maxLength": 40}}}}
+    }},
+    "risks": {"type": "array", "maxItems": 10, "items": {"type": "string", "maxLength": 200}}
+  }
+}

@@ -2,11 +2,16 @@ package com.infoagent.data.db
 
 import androidx.room.ColumnInfo
 import androidx.room.Entity
+import androidx.room.Index
 import androidx.room.PrimaryKey
 
 // §7 数据模型：记忆/留存域实体（蛇形列名与 DDL 一致）
 
-@Entity(tableName = "memory_fact")
+@Entity(
+    tableName = "memory_fact",
+    // v6：按 subject 找「仍然有效的那条」是最热的查询，索引跟迁移里建的一致
+    indices = [Index(value = ["subject", "valid_to"], name = "index_memory_fact_subject_valid_to")],
+)
 data class MemoryFactEntity(
     @PrimaryKey(autoGenerate = true) @ColumnInfo(name = "id") val id: Long = 0,
     @ColumnInfo(name = "category") val category: String, // HABIT/PREFERENCE/PATTERN/RELATION
@@ -19,6 +24,17 @@ data class MemoryFactEntity(
     @ColumnInfo(name = "last_seen") val lastSeen: Long? = null,
     @ColumnInfo(name = "source_refs") val sourceRefs: String? = null,
     @ColumnInfo(name = "period_hint") val periodHint: String? = null,
+
+    /** 这条事实从什么时候开始为真（毫秒）。0 = 迁移前的老数据，按 created_at 兜底 */
+    @ColumnInfo(name = "valid_from") val validFrom: Long = 0L,
+
+    /**
+     * 什么时候失效（毫秒）；null = 现在仍然有效。
+     *
+     * 为什么只标记不删除：事实变化时新旧两条都可能是真的（"以前住城西，现在住滨江"），
+     * 直接覆盖会把历史弄丢；判断挪到取用的时候做，只挑 validTo 为空的那条。
+     */
+    @ColumnInfo(name = "valid_to") val validTo: Long? = null,
     @ColumnInfo(name = "status") val status: String, // ACTIVE/DISMISSED/EDITED
     @ColumnInfo(name = "created_at") val createdAt: Long,
     @ColumnInfo(name = "updated_at") val updatedAt: Long,

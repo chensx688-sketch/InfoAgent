@@ -62,10 +62,16 @@ class BriefingPipeline(
     private val clock: () -> Long = System::currentTimeMillis,
     private val dateProvider: () -> String = { DayBoundary.today() },
     private val boundsProvider: () -> WindowBounds = { WindowBounds() },
+    /** 外部信息（天气/搜索）：为 null 表示未启用，pipeline 就直接跳过这一层 */
+    private val enricher: com.infoagent.enrich.Enricher? = null,
 ) {
 
     // 预算日期必须与 pipeline 的业务日期一致（否则跨零点/测试固定日期时会绕过额度）
     private val budget = BudgetGuard(db.agentDao(), dateProvider)
+
+    /** 追加/替换外部信息层（构造器带尾随 lambda，UI 侧用这个更清晰） */
+    fun withEnricher(enricher: com.infoagent.enrich.Enricher?): BriefingPipeline =
+        BriefingPipeline(db, client, configProvider, clock, dateProvider, boundsProvider, enricher)
 
     private data class Gathered(
         val input: BriefingInput,
@@ -79,6 +85,8 @@ class BriefingPipeline(
         val tempCount: Int,
         val stageCount: Int,
         val droppedNoise: Int,
+        /** 本窗口里被「采集范围」开关挡掉的条数（只用于向用户解释，不进 prompt） */
+        val mutedSkipped: Int = 0,
         val materialCount: Int,
         val windowStart: Long,
         val windowEnd: Long,
@@ -259,9 +267,23 @@ class BriefingPipeline(
         val now = clock()
         val bizDate = dateProvider()
         val prev = db.briefSliceDao().latestOk(bizDate)
+        val coveredMaxId = runCatching { db.briefSliceDao().maxCoveredId(bizDate) }.getOrNull() ?: 0L
         val from = prev?.toTs ?: startOfDay(bizDate)
         val to = now
         val rangeText = "${clockText(from)}–${clockText(to)}"
+
+        // v4 增量按**消息 id**取，不按时间戳：通知里的 postTime 在部分 ROM 上会沿用首次投递时间，
+        // 迟到消息/时钟回拨也会让 ts 落在水位线之前——按 ts 切窗会把这类新消息永久挡在外面，
+        // 表现就是「再补一份还是之前那几句，最新数据永远进不来」。
+        // 老片段（covered_max_id=0）保持按时间窗取数，兼容历史数据。
+        val byId = coveredMaxId > 0L
+        val fresh: List<WechatMessageEntity> = try {
+            if (byId) db.messageDao().messagesAfterId(coveredMaxId, SLICE_MESSAGE_LIMIT)
+            else db.messageDao().messagesBetween(from, to)
+        } catch (e: Exception) {
+            emptyList()
+        }
+        val newMaxId = fresh.maxOfOrNull { it.id } ?: coveredMaxId
 
         suspend fun record(
             state: String,
@@ -273,6 +295,13 @@ class BriefingPipeline(
             error: String?,
             permanent: Boolean,
             materialCount: Int,
+            /**
+             * 只有 OK 才推进水位：额度用完/解析失败/读库失败这些片段没被总结过，
+             * 推进了就等于把这批新消息永久吞掉。
+             */
+            covered: Long = if (state == "OK") newMaxId else coveredMaxId,
+            /** 本次用到的外部事实（换行分隔），存进 context_json 供 UI 展示「参考了什么」 */
+            context: String = "",
         ): SliceRun {
             val seq = runCatching { db.briefSliceDao().countByDay(bizDate) }.getOrDefault(0) + 1
             val id = runCatching {
@@ -292,6 +321,8 @@ class BriefingPipeline(
                         error = error,
                         createdAt = now,
                         readAt = null,
+                        coveredMaxId = covered,
+                        contextJson = context,
                     ),
                 )
             }.getOrDefault(0L)
@@ -317,21 +348,43 @@ class BriefingPipeline(
             )
         }
 
-        if (!force && to - from < 5 * 60_000L) {
+        // 手动是用户的显式动作，不受「5 分钟防抖」限制（否则刚补过一份再点就永远没反应）
+        if (!force && trigger != "MANUAL" && to - from < 5 * 60_000L) {
             return@withContext record("SKIPPED", null, null, 0, 0, 0, "间隔不足 5 分钟，已跳过", true, 0)
         }
         val config = configProvider()
             ?: return@withContext record("SKIPPED", null, null, 0, 0, 0, "还没有配置 API（设置里填写接口地址与 Key）", true, 0)
 
         val gathered = try {
-            gather(trigger, bizDate, now, config, boundsProvider(), longArrayOf(from, to))
+            gather(
+                window = trigger,
+                bizDate = bizDate,
+                now = now,
+                config = config,
+                bounds = boundsProvider(),
+                rangeOverride = longArrayOf(from, to),
+                messagesOverride = if (byId) fresh else null,
+            )
         } catch (e: Exception) {
             return@withContext record("FAILED", null, null, 0, 0, 0, "读取素材失败：${e.message?.take(80)}", false, 0)
         }
         if (gathered.input.messages.isEmpty() && gathered.dailyCount == 0 &&
             gathered.tempCount == 0 && gathered.stageCount == 0
         ) {
-            return@withContext record("SKIPPED", null, null, 0, 0, 0, "这一段没有新消息和备忘", true, 0)
+            // 跳过原因要能自证：告诉用户是哪一段、今天总共捕到多少、最近一条消息是什么时候
+            val todayCount = runCatching { db.messageDao().countSince(startOfDay(bizDate)) }.getOrDefault(0L)
+            val lastTs = runCatching { db.messageDao().maxTs() }.getOrNull()
+            val since = lastTs?.let { "最近一条 ${clockText(it)}" } ?: "一条都没捕到"
+            val mutedNote = if (gathered.mutedSkipped > 0) {
+                "；另有 ${gathered.mutedSkipped} 条来自你设为「不采集」的会话"
+            } else {
+                ""
+            }
+            return@withContext record(
+                "SKIPPED", null, null, 0, 0, 0,
+                "这一段没有新消息（$rangeText 内 0 条；今日共 $todayCount 条，$since$mutedNote）",
+                true, 0,
+            )
         }
         val useCase = if (trigger == "MANUAL") BudgetGuard.USE_MANUAL else BudgetGuard.USE_BRIEF
         if (!budget.canSpend(useCase, manual = trigger == "MANUAL")) {
@@ -346,6 +399,13 @@ class BriefingPipeline(
                 sanitize(b).wechatPoints.take(20).joinToString("\n") { "· ${it.conv}：${it.point}" }
             }
         }.orEmpty()
+
+        // 外部信息：用用户自己的天气/搜索 key 查「今天要做的这件事」相关的实时事实。
+        // 查不到就返回空，prompt 里不会出现【外部信息】——绝不假装联网。
+        val external = enricher?.let { e ->
+            runCatching { e.enrich(client, config, gathered.wechatLines, bizDate) }.getOrNull()
+        }
+        val externalBlock = external?.toPromptBlock().orEmpty()
 
         val prompt = listOf(
             ChatMessage("system", Prompts.BRIEF_SYSTEM),
@@ -363,7 +423,8 @@ class BriefingPipeline(
                     topFacts = gathered.factsLines,
                     prevSummary = prevSummary,
                     rangeText = rangeText,
-                    extraInstruction = "已在上一条简报中提过的事项，若本次无变化，写进 continued 字段，不要重复叙述。",
+                    externalFacts = externalBlock,
+                    extraInstruction = null, // 去重规则已写在【上一条简报摘要】标题里，不再重复一遍
                 ),
             ),
         )
@@ -405,22 +466,72 @@ class BriefingPipeline(
 
         budget.record(useCase, result.tokensIn, result.tokensOut, costEstimate(result.tokensIn, result.tokensOut))
 
-        return@withContext when (val parsed = SafeParser.parseBrief(result.content, trigger)) {
+        // 截断（finish_reason=length）意味着**后面的字段整节丢了**——哪怕能补全解析，
+        // 用户拿到的也是半份简报。所以只要截断就给一次加长的机会，并且只在第二次更完整时替换。
+        var final = result
+        var parsed = SafeParser.parseBriefLenient(final.content, trigger)
+        var retried = false
+        if (final.finishReason == "length") {
+            val bigger = config.copy(maxTokens = (config.maxTokens * 2).coerceAtMost(8192), temperature = 0.2)
+            retried = true
+            val second = try {
+                client.complete(bigger, prompt)
+            } catch (e: Exception) {
+                if (e is kotlinx.coroutines.CancellationException) throw e
+                null
+            }
+            if (second != null) {
+                budget.record(useCase, second.tokensIn, second.tokensOut, costEstimate(second.tokensIn, second.tokensOut))
+                val secondParsed = SafeParser.parseBriefLenient(second.content, trigger)
+                val current = (parsed as? SafeParser.Result.Ok)?.value
+                val candidate = (secondParsed as? SafeParser.Result.Ok)?.value
+                if (candidate != null && (current == null || completeness(candidate) >= completeness(current))) {
+                    final = second
+                    parsed = secondParsed
+                }
+            }
+        }
+
+        return@withContext when (parsed) {
             is SafeParser.Result.Ok -> {
                 val brief = sanitize(parsed.value)
-                val newCount = brief.wechatPoints.size +
-                    brief.memoStatus.pendingDaily.size +
-                    brief.memoStatus.pendingTemp.size +
-                    brief.recommendations.size
+                // 新增 = 这一段真正读进来的新消息条数（不是产出条目数），用户看到的「新增 N」才有意义
                 record(
-                    "OK", brief, result.content, newCount,
-                    result.tokensIn, result.tokensOut, null, false, gathered.materialCount,
+                    "OK", brief, final.content, gathered.input.messages.size,
+                    final.tokensIn, final.tokensOut, null, false, gathered.materialCount,
+                    context = external?.lines?.joinToString("\n").orEmpty(),
                 )
             }
             is SafeParser.Result.Failed -> record(
-                "FAILED", null, result.content, 0,
-                result.tokensIn, result.tokensOut, parsed.reason, false, gathered.materialCount,
+                "FAILED", null, final.content, 0,
+                final.tokensIn, final.tokensOut,
+                explainParseFailure(parsed.reason, final, retried), false, gathered.materialCount,
             )
+        }
+    }
+
+    /** 两次输出谁更完整（截断重试时用来决定是否替换） */
+    private fun completeness(brief: com.infoagent.agent.model.Brief): Int =
+        brief.wechatPoints.size + brief.advice.size * 2 + brief.topics.size * 2 +
+            brief.plan.timeline.size + brief.recommendations.size
+
+    /**
+     * 把「解析失败」翻译成用户能自己动手的一句话。
+     *
+     * 原来的 "JSON 解析失败（已缓存原文）" 对用户等于没说：
+     * 他不知道是被截断（调大 max_tokens）、还是模型不肯按格式答（换模型）。
+     */
+    private fun explainParseFailure(reason: String, result: com.infoagent.agent.ChatResult, retried: Boolean): String {
+        val head = result.content.trim().take(60).replace("\n", " ")
+        return when {
+            result.content.isBlank() ->
+                "模型返回了空内容（可能是推理模型或流式中断）。换成 deepseek-chat 这类非推理模型，或点重试。"
+            result.finishReason == "length" ->
+                "输出被 max_tokens 截断${if (retried) "（已自动加长重试仍不够）" else ""}：把设置里的 max_tokens 调到 3500 以上再试。原文已缓存。"
+            head.isEmpty() ->
+                "$reason（原文已缓存）"
+            else ->
+                "模型没按 JSON 回答：$reason。它开头写的是「${head}…」，原文已缓存。"
         }
     }
 
@@ -455,9 +566,16 @@ class BriefingPipeline(
         config: ApiConfig,
         bounds: WindowBounds,
         rangeOverride: LongArray? = null,
+        /** v4：增量片段直接给「新消息列表」（按 id 取），不再靠时间窗筛 */
+        messagesOverride: List<WechatMessageEntity>? = null,
     ): Gathered {
         val range = rangeOverride ?: windowRange(window, bizDate, now, bounds)
-        val all = db.messageDao().messagesBetween(range[0], range[1])
+        val raw = messagesOverride ?: db.messageDao().messagesBetween(range[0], range[1])
+        // 采集范围：用户设为「不采集」的会话，历史消息也不再进简报素材
+        // （否则关掉之后简报里还会一直出现它的旧内容，等于开关没生效）
+        val muted = runCatching { db.messageDao().mutedPeers().toSet() }.getOrElse { emptySet() }
+        val all = if (muted.isEmpty()) raw else raw.filterNot { it.peerId in muted }
+        val mutedSkipped = raw.size - all.size
         val focus = runCatching { db.messageDao().focusPeers().toSet() }.getOrElse { emptySet() }
         val refs = all.map {
             BriefingMessageRef(
@@ -511,9 +629,10 @@ class BriefingPipeline(
             tempCount = temp.size,
             stageCount = stage.size,
             droppedNoise = noise,
+            mutedSkipped = mutedSkipped,
             materialCount = lines.count,
-            windowStart = range[0],
-            windowEnd = range[1],
+            windowStart = all.minOfOrNull { it.ts } ?: range[0],
+            windowEnd = all.maxOfOrNull { it.ts } ?: range[1],
         )
     }
 
@@ -627,6 +746,9 @@ class BriefingPipeline(
     ): LongArray = range(window, bizDate, now, bounds)
 
     companion object {
+        /** 一次增量最多读多少条新消息（超出部分留给下一条片段，避免超长 prompt） */
+        const val SLICE_MESSAGE_LIMIT = 800
+
         /** 与实例无关的窗口计算，供 UI 在"还没生成"时展示区间与条数 */
         fun range(
             window: String,

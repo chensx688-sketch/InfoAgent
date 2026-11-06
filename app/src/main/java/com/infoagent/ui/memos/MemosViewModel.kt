@@ -32,6 +32,35 @@ class MemosViewModel(app: Application) : AndroidViewModel(app) {
     /** 阶段事件：跨天保留，不参与日清 */
     val stage: Flow<List<MemoItemEntity>> = repo.stageFlow()
 
+    /** 长期记忆（AI 从消息里提炼的稳定事实）：一条一行，按置信度排 */
+    val facts: Flow<List<com.infoagent.data.db.MemoryFactEntity>> = db.memoryDao().observeFacts()
+
+    /** 用户说「这条过期了」：只标记失效，不删历史（DB v6 起） */
+    fun expireFact(id: Long) = viewModelScope.launch {
+        db.memoryDao().supersede(id, System.currentTimeMillis())
+    }
+
+    /** 标错了可以恢复 */
+    fun restoreFact(id: Long) = viewModelScope.launch {
+        db.memoryDao().restore(id, System.currentTimeMillis())
+    }
+
+    /** 👍/👎：直接用记忆模块自己的规则调置信度，别在 UI 里另写一套公式 */
+    fun feedbackFact(id: Long, up: Boolean) = viewModelScope.launch {
+        val dao = db.memoryDao()
+        val fact = dao.factById(id) ?: return@launch
+        val now = System.currentTimeMillis()
+        val next = fact.feedbackSum + if (up) 2 else -5
+        val days = fact.lastSeen?.let { ((now - it) / 86_400_000L).toDouble() } ?: 0.0
+        dao.updateConfidence(
+            id,
+            com.infoagent.agent.MemoryMath.confidence(fact.evidenceCount.toInt(), next.toInt(), days).toLong(),
+            next,
+            fact.status,
+            now,
+        )
+    }
+
     init {
         // 开屏惰性归档 + 监听回前台信号（跨 0 点/时区变化）
         viewModelScope.launch {

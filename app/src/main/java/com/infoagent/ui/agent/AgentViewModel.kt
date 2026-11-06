@@ -51,15 +51,49 @@ class AgentViewModel(app: Application) : AndroidViewModel(app) {
         client,
         { settings.config() },
         boundsProvider = { bounds() },
-    )
+    ).withEnricher(com.infoagent.enrich.ContextEnricher.forApp(db, app))
     private val _selectedDate = MutableStateFlow(com.infoagent.data.util.DayBoundary.today())
     val selectedDate: StateFlow<String> = _selectedDate.asStateFlow()
+
+    /** 要点跳回原话：null=不显示详情页 */
+    private val _refFocus = MutableStateFlow<com.infoagent.data.repo.RefFocus?>(null)
+    val refFocus: StateFlow<com.infoagent.data.repo.RefFocus?> = _refFocus.asStateFlow()
+
+    /** 正在加载占位（避免点了没反应） */
+    private val RefFocusLoading = com.infoagent.data.repo.RefFocus(
+        title = "",
+        rows = emptyList(),
+        focusedCount = 0,
+        note = "正在找原文…",
+    )
 
     /** 当前日期的片段（按 seq 升序，随 DB 变化自动刷新） */
     @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
     val slices: StateFlow<List<com.infoagent.data.db.BriefSliceEntity>> =
         _selectedDate.flatMapLatest { db.briefSliceDao().observeByDay(it) }
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    /** 简报可视化用的真实数据（小时曲线/会话热度/完成率），换成别的日期要重新取 */
+    private val metricsRepo = com.infoagent.data.repo.BriefMetricsRepository(db)
+    private val _metrics = MutableStateFlow<com.infoagent.data.repo.DayMetrics?>(null)
+    val metrics: StateFlow<com.infoagent.data.repo.DayMetrics?> = _metrics.asStateFlow()
+
+    /** 数据新鲜度：简报为什么没跟上最新消息，直接给结论 */
+    private val freshnessRepo = com.infoagent.data.repo.FreshnessRepository(db, app)
+    private val _freshness = MutableStateFlow<com.infoagent.data.repo.Freshness?>(null)
+    val freshness: StateFlow<com.infoagent.data.repo.Freshness?> = _freshness.asStateFlow()
+
+    fun loadFreshness() {
+        viewModelScope.launch {
+            _freshness.value = runCatching { freshnessRepo.load(_selectedDate.value) }.getOrNull()
+        }
+    }
+
+    fun loadMetrics(date: String = _selectedDate.value) {
+        viewModelScope.launch {
+            _metrics.value = runCatching { metricsRepo.dayMetrics(date) }.getOrNull()
+        }
+    }
 
     private val _generating = MutableStateFlow(false)
     val generating: StateFlow<Boolean> = _generating.asStateFlow()
@@ -73,6 +107,8 @@ class AgentViewModel(app: Application) : AndroidViewModel(app) {
         if (_selectedDate.value == date) return
         _selectedDate.value = date
         _sliceError.value = null
+        _metrics.value = null
+        loadMetrics(date)
     }
 
     fun shiftDate(days: Long) {
@@ -87,7 +123,8 @@ class AgentViewModel(app: Application) : AndroidViewModel(app) {
         _sliceError.value = null
         viewModelScope.launch {
             try {
-                val result = pipeline.generateSlice("MANUAL")
+                // 手动是显式动作：force=true 才能绕过「5 分钟防抖」，否则刚补过再点会毫无反应
+                val result = pipeline.generateSlice("MANUAL", force = true)
                 if (result.state != "OK") {
                     _sliceError.value = result.error ?: "生成失败"
                 }
@@ -101,8 +138,37 @@ class AgentViewModel(app: Application) : AndroidViewModel(app) {
                 _sliceError.value = "生成失败：${e.message?.take(120)}"
             } finally {
                 _generating.value = false
+                loadMetrics()
+                loadFreshness()
             }
         }
+    }
+
+    /**
+     * 要点 → 原话：加载被引用的消息 + 同会话上下文。
+     *
+     * 为什么要带上下文：只有一句「报价单已发你」看不出所以然，
+     * 前面那句「预算 8 万能不能做」才是判断依据——用户点进来看的是「凭什么这么说」。
+     */
+    fun openRefs(ids: List<Long>) {
+        if (ids.isEmpty()) return
+        _refFocus.value = RefFocusLoading
+        viewModelScope.launch {
+            val focused = runCatching { db.messageDao().byIds(ids) }.getOrDefault(emptyList())
+            val context = if (focused.isEmpty()) {
+                emptyList()
+            } else {
+                val w = com.infoagent.data.repo.RefFocusBuilder.window(focused)
+                runCatching {
+                    db.messageDao().aroundPeer(focused.first().peerId, w.first, w.last)
+                }.getOrDefault(emptyList())
+            }
+            _refFocus.value = com.infoagent.data.repo.RefFocusBuilder.build(focused, context)
+        }
+    }
+
+    fun closeRefs() {
+        _refFocus.value = null
     }
 
     /** 失败片段重试（仍按增量规则补） */
@@ -112,11 +178,13 @@ class AgentViewModel(app: Application) : AndroidViewModel(app) {
         _sliceError.value = null
         viewModelScope.launch {
             try {
-                val result = pipeline.generateSlice("MANUAL")
+                val result = pipeline.generateSlice("MANUAL", force = true)
                 if (result.state != "OK") _sliceError.value = result.error ?: "重试失败"
                 refreshUsage()
             } finally {
                 _generating.value = false
+                loadMetrics()
+                loadFreshness()
             }
         }
     }
@@ -274,6 +342,8 @@ class AgentViewModel(app: Application) : AndroidViewModel(app) {
             _window.value = defaultWindow
             loadWindow(defaultWindow)
             refreshUsage()
+            loadMetrics()
+            loadFreshness()
         }
     }
 
