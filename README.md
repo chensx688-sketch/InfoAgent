@@ -14,7 +14,7 @@
 
 ## 技术栈
 
-Kotlin 2.0 · Jetpack Compose (Material 3) · Room 2.6（DB v3）· WorkManager + AlarmManager · OkHttp · DataStore/EncryptedSharedPreferences · minSdk 26 / targetSdk 35
+Kotlin 2.0 · Jetpack Compose (Material 3) · Room 2.6（DB v6：记忆只增 + 时间有效性）· WorkManager + AlarmManager · OkHttp · DataStore/EncryptedSharedPreferences · minSdk 26 / targetSdk 35
 
 ## 目录
 
@@ -32,7 +32,7 @@ scripts/       本地构建/测试脚本
 
 ## 构建
 
-需要 JDK 17 与 Android SDK Platform 35。`local.properties` 不提交，请本地创建：
+需要 JDK 17 及以上（本机用 JDK 21 验证）与 Android SDK Platform 35。`local.properties` 不提交，请本地创建：
 
 ```properties
 sdk.dir=C:\\path\\to\\Android\\Sdk
